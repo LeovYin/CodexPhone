@@ -1,6 +1,7 @@
 param([string]$Version, [string]$NodeVersion = '24.22.2', [switch]$SkipBuild)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+. (Join-Path $PSScriptRoot 'Common.ps1')
 Set-Location -LiteralPath $taskRoot
 if (-not $Version) { $Version = (Get-Content -LiteralPath (Join-Path $taskRoot 'package.json') -Raw | ConvertFrom-Json).version }
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?$' -or $NodeVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version' }
@@ -47,7 +48,7 @@ $shaLine = @(Get-Content -LiteralPath $shaFile | Where-Object { $_ -match ('\s+'
 if ($shaLine.Count -ne 1) { throw 'Official Node.js checksum entry missing' }
 $expected = ($shaLine[0] -split '\s+')[0].ToLowerInvariant()
 if (-not (Test-Path -LiteralPath $nodeZip)) { Invoke-WebRequest -Uri "$nodeBase/$nodeArchive" -OutFile $nodeZip -UseBasicParsing -TimeoutSec 180 }
-if ((Get-FileHash -LiteralPath $nodeZip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Node.js download checksum mismatch; remove the cached archive and retry' }
+if ((Get-CodexPhoneSha256 $nodeZip) -ne $expected) { throw 'Node.js download checksum mismatch; remove the cached archive and retry' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $nodeExpanded = Join-Path $buildRoot 'node'
 [IO.Compression.ZipFile]::ExtractToDirectory($nodeZip, $nodeExpanded)
@@ -62,7 +63,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Release content verification failed' }
 $payload = Join-Path $buildRoot 'payload.zip'
 [IO.Compression.ZipFile]::CreateFromDirectory($portable, $payload, [IO.Compression.CompressionLevel]::Optimal, $false)
 $metadata = Join-Path $buildRoot 'embedded-release.json'
-@{ version = $Version; payloadSha256 = (Get-FileHash -LiteralPath $payload -Algorithm SHA256).Hash.ToLowerInvariant(); integritySha256 = (Get-FileHash -LiteralPath (Join-Path $portable 'integrity.json') -Algorithm SHA256).Hash.ToLowerInvariant() } | ConvertTo-Json | Set-Content -LiteralPath $metadata -Encoding UTF8
+@{ version = $Version; payloadSha256 = (Get-CodexPhoneSha256 $payload); integritySha256 = (Get-CodexPhoneSha256 (Join-Path $portable 'integrity.json')) } | ConvertTo-Json | Set-Content -LiteralPath $metadata -Encoding UTF8
 $versionInfo = Join-Path $buildRoot 'VersionInfo.cs'
 $versionNumbers = ($Version -split '-')[0]
 @"
@@ -83,7 +84,7 @@ Copy-Item -LiteralPath $payload -Destination (Join-Path $output "CodexPhone-$Ver
 Copy-Item -LiteralPath (Join-Path $portable 'release.json') -Destination $output
 Copy-Item -LiteralPath (Join-Path $taskRoot 'docs\RELEASE_NOTES.md') -Destination $output
 Get-ChildItem -LiteralPath $output -File | Where-Object Name -ne 'SHA256SUMS.txt' | Sort-Object Name | ForEach-Object {
-  (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name
+  (Get-CodexPhoneSha256 $_.FullName) + '  ' + $_.Name
 } | Set-Content -LiteralPath (Join-Path $output 'SHA256SUMS.txt') -Encoding ASCII
 Write-Output "Release ready: $output"
 Write-Output "Build directory retained for verification: $buildRoot"

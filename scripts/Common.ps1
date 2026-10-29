@@ -11,6 +11,13 @@ function Resolve-CodexPhoneNode([string]$Root) {
   return $command.Source
 }
 
+function Get-CodexPhoneSha256([string]$FilePath) {
+  $stream = [IO.File]::OpenRead($FilePath)
+  $algorithm = [Security.Cryptography.SHA256]::Create()
+  try { return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+  finally { $algorithm.Dispose(); $stream.Dispose() }
+}
+
 function Get-CodexPhoneAddresses([int]$Port) {
   $addresses = @("http://127.0.0.1:$Port")
   try {

@@ -18,7 +18,7 @@ $outputExecutable = Join-Path $OutputDirectory 'codexphone-cli.exe'
 $source = Join-Path $PSScriptRoot 'SharedCliLauncher.cs'
 if (Test-Path -LiteralPath $prebuilt) {
   if (-not (Test-Path -LiteralPath $outputExecutable)) { Copy-Item -LiteralPath $prebuilt -Destination $outputExecutable }
-  elseif ((Get-FileHash -LiteralPath $prebuilt -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $outputExecutable -Algorithm SHA256).Hash) {
+  elseif ((Get-CodexPhoneSha256 $prebuilt) -ne (Get-CodexPhoneSha256 $outputExecutable)) {
     try { Copy-Item -LiteralPath $prebuilt -Destination $outputExecutable -Force } catch { throw 'Exit Codex normally before updating the native adapter, then start again.' }
   }
 } elseif (-not (Test-Path -LiteralPath $outputExecutable) -or (Get-Item -LiteralPath $source).LastWriteTimeUtc -gt (Get-Item -LiteralPath $outputExecutable).LastWriteTimeUtc) {

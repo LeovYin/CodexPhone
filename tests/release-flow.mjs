@@ -30,6 +30,8 @@ try {
   for (const key of Object.keys(env)) if (key.startsWith("CODEX") || key.startsWith("BROWSER_USE_")) delete env[key];
   const powershell = path.join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe");
   execFileSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(extracted, "scripts/Build-SharedLauncher.ps1"), "-CodexExecutable", node], { env, windowsHide: true, stdio: "pipe" });
+  // Reusing a prebuilt adapter exercises the module-independent SHA-256 comparison.
+  execFileSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(extracted, "scripts/Build-SharedLauncher.ps1"), "-CodexExecutable", node], { env, windowsHide: true, stdio: "pipe" });
   const shim = path.join(extracted, ".codexphone/launcher/codexphone-cli.exe");
   assert.equal(execFileSync(shim, ["--version"], { env, windowsHide: true, encoding: "utf8" }).trim(), bundledVersion);
   const require = createRequire(path.join(extracted, "apps/host/package.json"));

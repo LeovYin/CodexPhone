@@ -1,6 +1,8 @@
-# CodexPhone v0.1.0
+# CodexPhone v0.1.1
 
 首个 Windows x64 预览版本，使用 MIT 许可证。
+
+v0.1.1 修正云端 Windows 构建环境缺少 Get-FileHash 时的校验兼容性，改为直接使用 .NET SHA-256；保留 v0.1.0 发布记录。
 
 - 单文件 EXE，自带 Node.js 和原生适配器，释放至当前用户目录。
 - 原生启动面板：启动共享连接、换发配对码、环境检查、查看日志。
