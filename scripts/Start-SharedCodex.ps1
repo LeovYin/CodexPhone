@@ -5,6 +5,7 @@ $taskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $runtimeDir = if ($RuntimeDirectory) { [IO.Path]::GetFullPath($RuntimeDirectory) } else { Join-Path $taskRoot '.codexphone' }
 $backendRuntimeFile = Join-Path $runtimeDir 'backend-runtime.json'
 $runtimeFile = Join-Path $runtimeDir 'shared-runtime.json'
+$backendRoot = $taskRoot
 $desktopPackage = Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1
 if (-not $desktopPackage) { throw 'Cannot find the installed OpenAI.Codex desktop package.' }
 $desktopExecutable = Join-Path $desktopPackage.InstallLocation 'app\ChatGPT.exe'
@@ -31,16 +32,16 @@ function Find-Desktop {
     (-not $env:CODEX_ELECTRON_USER_DATA_PATH -or $_.CommandLine -like "*$($env:CODEX_ELECTRON_USER_DATA_PATH)*")
   })
 }
-function Read-Backend {
+function Read-Backend([string]$BackendRoot = $backendRoot, [string]$StateFile = $backendRuntimeFile, [string]$Address = $sharedAddress) {
   $script:backendCheckReason = 'missing-state'
-  if (-not (Test-Path -LiteralPath $backendRuntimeFile)) { return $null }
+  if (-not (Test-Path -LiteralPath $StateFile)) { return $null }
   try {
-    $value = Get-Content -LiteralPath $backendRuntimeFile -Raw | ConvertFrom-Json
+    $value = Get-Content -LiteralPath $StateFile -Raw | ConvertFrom-Json
     $script:backendCheckReason = 'address-or-readiness'
-    if ($value.address -ne $sharedAddress -or $value.status -ne 'connected' -or -not $value.guiInitialized) { return $null }
+    if ($value.address -ne $Address -or $value.status -ne 'connected' -or -not $value.guiInitialized) { return $null }
     $adapter = Get-CimInstance Win32_Process -Filter "ProcessId = $($value.adapterPid)"
     $backend = Get-CimInstance Win32_Process -Filter "ProcessId = $($value.backendPid)"
-    $proxyPath = Join-Path $PSScriptRoot 'shared-cli-proxy.mjs'
+    $proxyPath = Join-Path $BackendRoot 'scripts\shared-cli-proxy.mjs'
     $script:backendCheckReason = 'backend-process-lineage'
     if ($adapter.Name -ne 'node.exe' -or $adapter.CommandLine -notlike "*$proxyPath*" -or $backend.ParentProcessId -ne $adapter.ProcessId -or $backend.Name -ne 'codex.exe') { return $null }
     $native = Get-CimInstance Win32_Process -Filter "ProcessId = $($adapter.ParentProcessId)"
@@ -49,7 +50,7 @@ function Read-Backend {
     for ($depth = 0; $depth -lt 6 -and $desktop.ExecutablePath -eq $desktopExecutable -and $desktop.CommandLine -match '--type='; $depth++) {
       $desktop = Get-CimInstance Win32_Process -Filter "ProcessId = $($desktop.ParentProcessId)"
     }
-    $expectedNativePath = Join-Path $taskRoot '.codexphone\launcher\codexphone-cli.exe'
+    $expectedNativePath = Join-Path $BackendRoot '.codexphone\launcher\codexphone-cli.exe'
     $script:backendCheckReason = 'desktop-process-lineage'
     if ($native.ExecutablePath -ne $expectedNativePath -or $desktop.ExecutablePath -ne $desktopExecutable -or $desktop.CommandLine -match '--type=') { return $null }
     $script:backendCheckReason = 'desktop-profile'
@@ -59,12 +60,7 @@ function Read-Backend {
   } catch { $script:backendCheckReason = 'state-read-error'; return $null }
 }
 function Find-Bridge {
-  $owners = @(Get-NetTCPConnection -LocalPort $PhonePort -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
-  foreach ($owner in $owners) {
-    $candidate = Get-CimInstance Win32_Process -Filter "ProcessId = $owner"
-    if ($candidate.Name -ne 'node.exe' -or ($candidate.CommandLine -notlike "*$bridgeEntry*" -and $candidate.CommandLine -notlike '*apps/host/dist/index.js*')) { throw "Port $PhonePort belongs to an unrelated process; no process was stopped." }
-    $candidate
-  }
+  Find-CodexPhoneBridge $PhonePort
 }
 function Start-Bridge([bool]$Shared) {
   if ($Shared) { $env:CODEXPHONE_APP_SERVER_URL = $sharedAddress } else { Remove-Item Env:CODEXPHONE_APP_SERVER_URL -ErrorAction SilentlyContinue }
@@ -93,6 +89,34 @@ if (-not $CheckOnly) {
 }
 try {
 $runningDesktop = @(Find-Desktop)
+$bridgeProcesses = @(Find-Bridge)
+# A source checkout or another extracted EXE version may already own the healthy connection.
+# Validate the live backend against that installation, then reuse it without stopping active work.
+foreach ($bridge in $bridgeProcesses) {
+  $registration = if ($bridge.CodexPhoneRoot -eq $taskRoot) { $runtimeFile } else { Join-Path $bridge.CodexPhoneRoot '.codexphone\shared-runtime.json' }
+  try {
+    $registered = Get-Content -LiteralPath $registration -Raw | ConvertFrom-Json
+    if ($registered.bridgePid -ne $bridge.ProcessId -or $registered.phonePort -ne $PhonePort) { continue }
+    $registeredAddress = [Uri]$registered.address
+    if ($registeredAddress.Scheme -ne 'ws' -or $registeredAddress.Host -ne '127.0.0.1' -or $registeredAddress.UserInfo -or $registeredAddress.Port -lt 1024) { continue }
+    if (-not $automaticPort -and $AppServerPort -ne $registeredAddress.Port) { continue }
+    $ownerRoot = if ($registered.backendRoot) { [IO.Path]::GetFullPath($registered.backendRoot) } else { $bridge.CodexPhoneRoot }
+    $ownerFile = Join-Path $ownerRoot '.codexphone\backend-runtime.json'
+    if ($bridge.CodexPhoneRoot -eq $taskRoot -and $ownerRoot -eq $taskRoot) { $ownerFile = $backendRuntimeFile }
+    $verifiedBackend = Read-Backend -BackendRoot $ownerRoot -StateFile $ownerFile -Address $registered.address
+    if (-not $verifiedBackend -or $verifiedBackend.adapterPid -ne $registered.adapterPid -or $verifiedBackend.backendPid -ne $registered.appServerPid) { continue }
+    $health = Invoke-RestMethod "http://127.0.0.1:$PhonePort/api/health" -TimeoutSec 2
+    if ($health.status -ne 'ready' -or $health.transport -ne 'websocket') { continue }
+    if (-not $CheckOnly -and -not $RenewPairing) {
+      Write-Output 'Shared mode is already running in a verified CodexPhone installation. Existing tasks and phone pairing are preserved.'
+      foreach ($address in @(Get-CodexPhoneAddresses $PhonePort)) { Write-Output "Open: $address" }
+      return
+    }
+    $backendRoot = $ownerRoot; $backendRuntimeFile = $ownerFile
+    $sharedAddress = $registered.address; $AppServerPort = $registeredAddress.Port
+    break
+  } catch { }
+}
 $existingBackend = Read-Backend
 if (-not $CheckOnly -and $runningDesktop.Count -and -not $existingBackend -and (Test-Path -LiteralPath $backendRuntimeFile)) {
   # The GUI can restart its local host while applying initial feature configuration.
@@ -101,7 +125,6 @@ if (-not $CheckOnly -and $runningDesktop.Count -and -not $existingBackend -and (
     $existingBackend = Read-Backend
   }
 }
-$bridgeProcesses = @(Find-Bridge)
 if ($CheckOnly) {
   [pscustomobject]@{ DesktopFound = $true; DesktopCurrentlyRunning = [bool]$runningDesktop.Count; SharedBackendRunning = [bool]$existingBackend; CodeBuilt = $true; WillRequireDesktopExit = [bool]($runningDesktop.Count -and -not $existingBackend); PhoneAddresses = @(Get-CodexPhoneAddresses $PhonePort); BundledNode = (Test-Path -LiteralPath (Join-Path $taskRoot 'runtime\node.exe')); AdapterCompilerFound = (Test-Path -LiteralPath (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe')) }
   return
@@ -122,6 +145,9 @@ $oldBridgeStopped = $false; $bridgeStarted = $null
 try {
   $existingBackend = Read-Backend
   if (-not $existingBackend) {
+    # A reused installation can disappear while the user exits the GUI; create our own owner next.
+    $backendRoot = $taskRoot
+    $backendRuntimeFile = Join-Path $runtimeDir 'backend-runtime.json'
     if ($automaticPort) {
       # A stale registry must not choose an unrelated occupied port outside our range.
       $AppServerPort = 4501
@@ -175,7 +201,7 @@ try {
   $bridgeStarted = Start-Bridge $true
   $health = Wait-Bridge $true
   $desktopProcessId = if ($desktopStarted) { $desktopStarted.Id } else { @(Find-Desktop | Select-Object -First 1)[0].ProcessId }
-  @{ mode = 'gui-owned-stdio-adapter'; desktopPid = $desktopProcessId; bridgePid = $bridgeStarted.Id; appServerPid = $existingBackend.backendPid; adapterPid = $existingBackend.adapterPid; address = $sharedAddress; phonePort = $PhonePort; startedAt = [DateTime]::UtcNow.ToString('o'); guiInitialized = $true; appToolsEnvironmentPresent = $existingBackend.appToolsEnvironmentPresent } | ConvertTo-Json | Set-Content -LiteralPath $runtimeFile -Encoding UTF8
+  @{ mode = 'gui-owned-stdio-adapter'; desktopPid = $desktopProcessId; bridgePid = $bridgeStarted.Id; appServerPid = $existingBackend.backendPid; adapterPid = $existingBackend.adapterPid; backendRoot = $backendRoot; address = $sharedAddress; phonePort = $PhonePort; startedAt = [DateTime]::UtcNow.ToString('o'); guiInitialized = $true; appToolsEnvironmentPresent = $existingBackend.appToolsEnvironmentPresent } | ConvertTo-Json | Set-Content -LiteralPath $runtimeFile -Encoding UTF8
   Write-Output 'Shared mode ready. Phone pairing is preserved. Start Codex with Start-CodexPhone.cmd next time.'
   foreach ($address in @(Get-CodexPhoneAddresses $PhonePort)) { Write-Output "Open: $address" }
 } catch {

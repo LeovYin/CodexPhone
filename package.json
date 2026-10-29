@@ -1,7 +1,7 @@
 {
   "name": "codexphone",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "license": "MIT",
   "packageManager": "pnpm@11.7.0",
   "scripts": {
@@ -17,7 +17,8 @@
     "test:sync": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/host build && node tests/shared-flow.mjs && node tests/shared-host-flow.mjs && node tests/shared-adapter-flow.mjs && node tests/shared-adapter-lifecycle.mjs",
     "test:launcher": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/host build && node tests/shared-launcher-flow.mjs",
     "release:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-Release.ps1",
-    "release:test": "node tests/release-flow.mjs"
+    "release:test": "node tests/release-flow.mjs",
+    "brand:build": "node scripts/Build-Brand.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",

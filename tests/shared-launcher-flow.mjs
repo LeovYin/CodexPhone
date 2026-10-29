@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, cp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import net from "node:net";
@@ -11,13 +11,14 @@ import { stopOwnedProcessTree } from "./process-cleanup.mjs";
 
 if (process.platform !== "win32") process.exit(0);
 const root = await mkdtemp(path.join(tmpdir(), "codexphone-launcher-flow-"));
+const launchRoot = path.resolve(process.env.CODEXPHONE_LAUNCHER_TEST_ROOT || ".");
 const provider = await startMockProvider();
 const freePort = async () => { const reservation = net.createServer(); await new Promise((resolve) => reservation.listen(0, "127.0.0.1", resolve)); const port = reservation.address().port; await new Promise((resolve) => reservation.close(resolve)); return port; };
 const phonePort = await freePort(), stalePort = await freePort();
 const occupied = net.createServer();
 occupied.on("connection", (socket) => socket.destroy());
 await new Promise((resolve, reject) => { occupied.once("error", (error) => error.code === "EADDRINUSE" ? resolve() : reject(error)); occupied.listen(4501, "127.0.0.1", resolve); });
-const home = path.join(root, "codex"), phoneHome = path.join(root, "phone"), runtimeDir = path.join(root, "runtime");
+const home = path.join(root, "codex"), phoneHome = path.join(root, "phone"), runtimeDir = process.env.CODEXPHONE_LAUNCHER_TEST_ROOT ? path.join(launchRoot, ".codexphone") : path.join(root, "runtime");
 await mkdir(home); await mkdir(runtimeDir);
 await writeFile(path.join(home, "config.toml"), `model = "codexphone-fixture"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "Local test fixture"\nbase_url = "${provider.url}"\nwire_api = "responses"\nrequires_openai_auth = false\n`);
 await writeFile(path.join(home, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "codexphone-local-fixture-not-a-real-key" }));
@@ -26,7 +27,7 @@ const env = { ...process.env, CODEX_HOME: home, CODEXPHONE_HOME: phoneHome, CODE
 for (const name of ["CODEXPHONE_APP_SERVER_URL", "CODEX_CLI_PATH", "CODEX_APP_RUNTIME_CLI_PATH", "CODEX_APP_SERVER_WS_URL", "CODEX_APP_SERVER_FORCE_CLI", "CODEX_THREAD_ID", "CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY", "CODEX_APP_TOOLS_PIPE_PATH"]) delete env[name];
 const executable = (await readFile(path.resolve(".codexphone/launcher/launcher-paths.txt"), "utf8")).trim().split(/\r?\n/).at(-1);
 const stale = spawn(executable, ["app-server", "--listen", `ws://127.0.0.1:${stalePort}`], { env, stdio: "ignore", windowsHide: true });
-const old = spawn(process.execPath, [path.resolve("apps/host/dist/index.js")], { env: { ...env, CODEXPHONE_APP_SERVER_URL: `ws://127.0.0.1:${stalePort}` }, stdio: "ignore", windowsHide: true });
+const old = spawn(process.execPath, [path.join(launchRoot, "apps/host/dist/index.js")], { env: { ...env, CODEXPHONE_APP_SERVER_URL: `ws://127.0.0.1:${stalePort}` }, stdio: "ignore", windowsHide: true });
 await writeFile(path.join(runtimeDir, "backend-runtime.json"), JSON.stringify({ status: "connected", address: "ws://127.0.0.1:4501", adapterPid: old.pid, backendPid: stale.pid, guiInitialized: true }));
 let launcher, runtime, desktopClient, failed = false;
 const waitFor = async (predicate, label) => { const deadline = Date.now() + 45_000; while (Date.now() < deadline) { if (await predicate()) return; await new Promise((resolve) => setTimeout(resolve, 100)); } throw new Error(`Timed out: ${label}`); };
@@ -36,7 +37,7 @@ try {
   await waitFor(async () => (await health()).status === "ready", "isolated original phone bridge");
   assert.equal((await health()).transport, "websocket");
   let output = "";
-  launcher = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.resolve("scripts/Start-SharedCodex.ps1"), "-PhonePort", String(phonePort), "-RuntimeDirectory", runtimeDir], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  launcher = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(launchRoot, "scripts/Start-SharedCodex.ps1"), "-PhonePort", String(phonePort), "-RuntimeDirectory", runtimeDir], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   launcher.stdout.on("data", (data) => { output += data; }); launcher.stderr.on("data", (data) => { output += data; });
   const code = await new Promise((resolve) => launcher.on("exit", resolve));
   assert.equal(code, 0, output);
@@ -52,13 +53,36 @@ try {
   await desktopClient.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "isolated launch fixture" }] }); await completed;
   const detail = await fetch(`http://127.0.0.1:${phonePort}/api/threads/${thread.id}`, { headers: { Authorization: `Bearer ${paired.token}` } }); assert.equal(detail.status, 200);
   assert.equal((await detail.json()).thread.canControl, true);
-  const again = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.resolve("scripts/Start-SharedCodex.ps1"), "-PhonePort", String(phonePort), "-RuntimeDirectory", runtimeDir], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const again = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(launchRoot, "scripts/Start-SharedCodex.ps1"), "-PhonePort", String(phonePort), "-RuntimeDirectory", runtimeDir], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let againOutput = ""; again.stdout.on("data", (data) => { againOutput += data; }); again.stderr.on("data", (data) => { againOutput += data; });
   assert.equal(await new Promise((resolve) => again.on("exit", resolve)), 0, againOutput);
   console.log("Isolated launcher: repeated launch recognized");
+  if (process.env.CODEXPHONE_LAUNCHER_TEST_ROOT) {
+  const secondRoot = path.join(root, "new install 中文");
+  await mkdir(path.join(secondRoot, "apps/host/dist"), { recursive: true });
+  await cp(path.resolve("scripts"), path.join(secondRoot, "scripts"), { recursive: true });
+  await cp(path.resolve("apps/host/package.json"), path.join(secondRoot, "apps/host/package.json"));
+  await cp(path.resolve("apps/host/dist/index.js"), path.join(secondRoot, "apps/host/dist/index.js"));
+  // A separate installation discovers the original owner through its own registry.
+  // Use the standard location here while retaining isolated ports and profiles.
+  const sourceRegistration = path.join(runtimeDir, "shared-runtime.json");
+    provider.state.hold = true;
+    const held = await desktopClient.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: "held migration fixture" }] });
+    await waitFor(async () => (await health()).activeTasks === 1, "active task before cross-install reuse");
+    const incoming = spawn("powershell.exe", ["-NoProfile", "-File", path.join(secondRoot, "scripts/Start-SharedCodex.ps1"), "-PhonePort", String(phonePort)], { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    let output = ""; incoming.stdout.on("data", data => { output += data; }); incoming.stderr.on("data", data => { output += data; });
+    assert.equal(await new Promise(resolve => incoming.once("exit", resolve)), 0, output);
+    assert.match(output, /already running in a verified CodexPhone installation/);
+    assert.equal((await health()).activeTasks, 1);
+    assert.equal(JSON.parse((await readFile(sourceRegistration, "utf8")).replace(/^\uFEFF/, "")).bridgePid, runtime.bridgePid);
+    await desktopClient.request("turn/interrupt", { threadId: thread.id, turnId: held.turn.id });
+    provider.state.hold = false;
+    await waitFor(async () => (await health()).activeTasks === 0, "held fixture interrupted");
+    console.log("Cross-install active task reuse: passed");
+  }
   assert.equal((await health()).transport, "websocket");
   const beforePairRefresh = runtime;
-  const renew = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.resolve("scripts/Start-SharedCodex.ps1"), "-PhonePort", String(phonePort), "-RuntimeDirectory", runtimeDir, "-RenewPairing"], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const renew = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(launchRoot, "scripts/Start-SharedCodex.ps1"), "-PhonePort", String(phonePort), "-RuntimeDirectory", runtimeDir, "-RenewPairing"], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let renewOutput = ""; renew.stdout.on("data", (data) => { renewOutput += data; }); renew.stderr.on("data", (data) => { renewOutput += data; });
   assert.equal(await new Promise((resolve) => renew.once("exit", resolve)), 0, renewOutput);
   runtime = JSON.parse((await readFile(path.join(runtimeDir, "shared-runtime.json"), "utf8")).replace(/^\uFEFF/, ""));

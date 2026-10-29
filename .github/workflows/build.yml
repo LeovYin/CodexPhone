@@ -21,6 +21,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - run: node tests/bridge-ownership.mjs
       - run: pnpm exec playwright install chromium
       - run: pnpm build
       - run: pnpm test:e2e

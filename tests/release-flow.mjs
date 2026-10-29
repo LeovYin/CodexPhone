@@ -24,6 +24,9 @@ try {
   assert.match(bundledVersion, /^v24\./);
   assert.ok((await readFile(path.join(extracted, "runtime/NODE-LICENSE.txt"), "utf8")).includes("Node.js"));
   assert.ok((await readFile(path.join(extracted, "USER_GUIDE.txt"), "utf8")).includes("CodexPhone 使用说明"));
+  const ico = await readFile(path.join(extracted, "runtime/codexphone.ico"));
+  assert.equal(ico.readUInt16LE(2), 1); assert.equal(ico.readUInt16LE(4), 7);
+  assert.ok((await readFile(path.join(extracted, "apps/web/dist/icons/icon.svg"), "utf8")).includes("CodexPhone"));
   assert.ok((await readFile(path.join(extracted, "THIRD-PARTY-NOTICES.txt"), "utf8")).includes("react"));
   const minimalPath = path.join(process.env.SystemRoot, "System32") + ";" + path.join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0");
   const env = { ...process.env, PATH: minimalPath, Path: minimalPath };

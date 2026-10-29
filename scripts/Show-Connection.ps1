@@ -9,12 +9,14 @@ $health = Invoke-RestMethod "http://127.0.0.1:$PhonePort/api/health" -TimeoutSec
 Write-Output "CodexPhone: $($health.status) / $($health.transport); paired devices: $($health.pairedDevices)"
 foreach ($address in @(Get-CodexPhoneAddresses $PhonePort)) { Write-Output "Open: $address" }
 Write-Output 'Connect the phone and this computer to the same Tailscale network.'
-$runtime = Join-Path $taskRoot '.codexphone\shared-runtime.json'
+$bridges = @(Find-CodexPhoneBridge $PhonePort)
+$ownerRoot = if ($bridges.Count -eq 1) { $bridges[0].CodexPhoneRoot } else { $taskRoot }
+$runtime = Join-Path $ownerRoot '.codexphone\shared-runtime.json'
 if (Test-Path -LiteralPath $runtime) {
   $saved = Get-Content -LiteralPath $runtime -Raw | ConvertFrom-Json
   $listener = @(Get-NetTCPConnection -LocalPort $PhonePort -State Listen -ErrorAction SilentlyContinue | Where-Object OwningProcess -eq $saved.bridgePid)
   if ($listener.Count) {
-    $log = Join-Path $taskRoot '.codexphone\host-shared.log'
+    $log = Join-Path $ownerRoot '.codexphone\host-shared.log'
     $pairing = $null
     if (Test-Path -LiteralPath $log) {
       foreach ($line in @(Get-Content -LiteralPath $log -Tail 300 -ErrorAction SilentlyContinue)) {

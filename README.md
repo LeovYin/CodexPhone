@@ -1,3 +1,7 @@
+![CodexPhone — 同一个任务，从电脑到手机](assets/brand/banner.png)
+
+<p align="center"><img src="assets/brand/icon-128.png" width="72" alt="CodexPhone 应用图标"></p>
+
 # CodexPhone
 
 在手机上继续电脑里的 Codex 对话。通过自己的 Tailscale 网络连接，使用电脑上原有的 Codex 和 API 配置。
@@ -19,6 +23,8 @@ EXE 内置 Node.js 和原生适配器，不需要安装 pnpm 或编译器。它�
 - 首次切换时，从 Codex 菜单正常退出一次，让启动器自动重新打开它。
 
 程序等待后端稳定至少 15 秒才完成连接。以后通过 CodexPhone 启动，共享现有对话。配对数据会保留。
+
+已有源码版或旧版正在共享时，新版核对进程归属后直接复用，避免打断任务。面板的“桌面快捷方式”会保存一份稳定的启动程序并创建桌面入口，下载文件移走后仍可使用。图标与横幅的 SVG 源文件位于 assets/brand。
 
 详细步骤见 [使用说明](docs/USER_GUIDE.md)，版本变化见 [Release Notes](docs/RELEASE_NOTES.md)。
 

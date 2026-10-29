@@ -98,6 +98,12 @@ internal static class CodexPhoneBootstrap
                 finally { mutex.ReleaseMutex(); }
             }
             if (extractOnly) return 0;
+            if (args.Length == 1 && args[0] == "--install-shortcut")
+            {
+                var setup = new ProcessStartInfo("powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File \"" + Path.Combine(installedRoot, "scripts", "Create-Shortcut.ps1") + "\" -Executable \"" + Assembly.GetExecutingAssembly().Location + "\"");
+                setup.UseShellExecute = false; setup.CreateNoWindow = true;
+                using (var process = Process.Start(setup)) { process.WaitForExit(); return process.ExitCode; }
+            }
             if (renderPreview)
             {
                 using (var form = new LauncherForm(installedRoot, version))
@@ -138,6 +144,7 @@ internal static class CodexPhoneBootstrap
         {
             root = directory;
             Text = "CodexPhone";
+            Icon = new Icon(Path.Combine(root, "runtime", "codexphone.ico"));
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(640, 650);
             MinimumSize = new Size(610, 640);
@@ -175,6 +182,8 @@ internal static class CodexPhoneBootstrap
             logs.LinkClicked += delegate { string folder = Path.Combine(root, ".codexphone"); Directory.CreateDirectory(folder); Process.Start(new ProcessStartInfo(folder) { UseShellExecute = true }); }; Controls.Add(logs);
             var guide = new LinkLabel { Text = "使用说明", Location = new Point(375, 550), AutoSize = true, Anchor = AnchorStyles.Bottom | AnchorStyles.Left, LinkColor = ColorTranslator.FromHtml("#315FCA") };
             guide.LinkClicked += delegate { Process.Start(new ProcessStartInfo(Path.Combine(root, "USER_GUIDE.txt")) { UseShellExecute = true }); }; Controls.Add(guide);
+            var shortcut = new LinkLabel { Text = "桌面快捷方式", Location = new Point(466, 550), AutoSize = true, Anchor = AnchorStyles.Bottom | AnchorStyles.Left, LinkColor = ColorTranslator.FromHtml("#315FCA") };
+            shortcut.LinkClicked += async delegate { await RunScript("Create-Shortcut.ps1", "-Executable \"" + Assembly.GetExecutingAssembly().Location + "\"", false); }; Controls.Add(shortcut);
             Controls.Add(new Label { Text = "社区开源工具 · MIT 许可 · 非 OpenAI 官方产品", Location = new Point(30, 602), AutoSize = true, Anchor = AnchorStyles.Bottom | AnchorStyles.Left, ForeColor = ColorTranslator.FromHtml("#657188") });
             FormClosing += delegate(object sender, FormClosingEventArgs e) {
                 if (busy) { e.Cancel = true; MessageBox.Show("当前操作仍在进行，请等它完成后再关闭面板。", "CodexPhone"); }

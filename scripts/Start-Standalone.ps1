@@ -7,11 +7,7 @@ if (-not $package) { throw 'The Codex desktop package is unavailable.' }
 $desktop = Join-Path $package.InstallLocation 'app\ChatGPT.exe'
 if (Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $desktop -and $_.CommandLine -notmatch '--type=' }) { throw 'Finish tasks and fully exit Codex before restoring standalone mode.' }
 $entry = Join-Path $taskRoot 'apps\host\dist\index.js'
-$owners = @(Get-NetTCPConnection -LocalPort 4318 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique)
-foreach ($owner in $owners) {
-  $candidate = Get-CimInstance Win32_Process -Filter "ProcessId = $owner"
-  if ($candidate.Name -ne 'node.exe' -or ($candidate.CommandLine -notlike "*$entry*" -and $candidate.CommandLine -notlike '*apps/host/dist/index.js*')) { throw 'Port 4318 belongs to an unrelated process. Nothing was stopped.' }
-}
+$owners = @(Find-CodexPhoneBridge 4318 | Select-Object -ExpandProperty ProcessId)
 try {
   $health = Invoke-RestMethod 'http://127.0.0.1:4318/api/health' -TimeoutSec 1
   if ($health.activeTasks -gt 0) { throw 'A phone task is running. Wait for completion.' }
