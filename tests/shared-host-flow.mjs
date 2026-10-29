@@ -1,0 +1,54 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import net from "node:net";
+import { AppServerClient } from "../apps/host/dist/app-server.js";
+import { DeviceStore } from "../apps/host/dist/store.js";
+import { startMockProvider } from "./mock-provider.mjs";
+import { stopOwnedProcessTree } from "./process-cleanup.mjs";
+
+const root = await mkdtemp(path.join(tmpdir(), "codexphone-host-flow-"));
+const codexHome = path.join(root, "codex"); const phoneHome = path.join(root, "phone");
+await mkdir(codexHome); const provider = await startMockProvider();
+const reservation = net.createServer(); await new Promise((resolve) => reservation.listen(0, "127.0.0.1", resolve));
+const port = reservation.address().port; await new Promise((resolve) => reservation.close(resolve));
+const url = `ws://127.0.0.1:${port}`;
+await writeFile(path.join(codexHome, "config.toml"), `model = "codexphone-fixture"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "Local fixture"\nbase_url = "${provider.url}"\nwire_api = "responses"\nrequires_openai_auth = false\n`);
+const startBackend = () => { const child = spawn(process.env.CODEX_BIN || "codex", ["app-server", "--listen", url], { env: { ...process.env, CODEX_HOME: codexHome }, stdio: ["ignore", "ignore", "pipe"], windowsHide: true }); child.stderr.on("data", () => {}); return child; };
+let backend = startBackend(), desktop, runtime;
+const waitFor = async (predicate, label) => { const deadline = Date.now() + 20_000; while (Date.now() < deadline) { if (await predicate()) return; await new Promise((resolve) => setTimeout(resolve, 100)); } throw new Error(`Timed out: ${label}`); };
+try {
+  await waitFor(async () => { try { desktop = await AppServerClient.connect(url); return true; } catch { return false; } }, "initial backend");
+  const events = []; desktop.on("notification", (event) => events.push(event));
+  const threadId = (await desktop.request("thread/start", { cwd: root })).thread.id;
+  await desktop.request("turn/start", { threadId, input: [{ type: "text", text: "desktop initial" }] });
+  await waitFor(() => events.some((event) => event.method === "turn/completed"), "initial desktop turn");
+  const devices = new DeviceStore(phoneHome); await devices.load(); const paired = await devices.pair(devices.pairingInfo.code, "fixture");
+  Object.assign(process.env, { CODEXPHONE_HOME: phoneHome, CODEXPHONE_PROJECTS: `Fixture=${root}`, CODEXPHONE_APP_SERVER_URL: url, HOST: "127.0.0.1", PORT: "0", LOG_LEVEL: "silent" });
+  runtime = await import("../apps/host/dist/index.js");
+  const base = `http://127.0.0.1:${runtime.host.server.address().port}`;
+  const headers = { Authorization: `Bearer ${paired.token}` };
+  const request = async (endpoint, body) => {
+    const response = await fetch(`${base}/api/${endpoint}`, { headers: { ...headers, ...(body ? { "Content-Type": "application/json" } : {}) }, ...(body ? { method: "POST", body: JSON.stringify(body) } : {}) });
+    const json = await response.json(); assert.equal(response.status, 200, `${endpoint}: ${json.error || response.status}`); return json;
+  };
+  assert.equal((await request("health")).transport, "websocket");
+  await request(`threads/${threadId}`);
+  await request(`threads/${threadId}/turns`, { prompt: "phone HTTP turn" });
+  await waitFor(() => events.filter((event) => event.method === "turn/completed").length === 2, "desktop sees phone HTTP turn");
+  await desktop.request("turn/start", { threadId, input: [{ type: "text", text: "desktop after phone completion" }] });
+  await waitFor(async () => (await request(`threads/${threadId}`)).turns.length === 3, "phone remains subscribed after completion");
+  desktop.close(); desktop = undefined; stopOwnedProcessTree(backend);
+  await waitFor(async () => (await request("health")).status === "degraded", "host notices disconnect");
+  backend = startBackend();
+  await waitFor(async () => (await request("health")).status === "ready", "host reconnects without restarting phone service");
+  const detail = await request(`threads/${threadId}`); assert.equal(detail.thread.id, threadId);
+  await request(`threads/${threadId}/turns`, { prompt: "phone after backend restart" });
+  await waitFor(async () => (await request(`threads/${threadId}`)).turns.some((turn) => turn.items.some((item) => item.text.includes("response 4"))), "send after reconnect");
+  console.log(JSON.stringify({ authenticatedPhoneSend: "passed", desktopReceivesPhoneTurn: "passed", subscriptionSurvivesCompletion: "passed", backendRestartRecovery: "passed", pairingPreserved: (await request("health")).pairedDevices === 1, externalApiCalls: 0 }));
+} finally {
+  desktop?.close(); if (runtime) await runtime.closeHost(); stopOwnedProcessTree(backend); await provider.close();
+  await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
+}

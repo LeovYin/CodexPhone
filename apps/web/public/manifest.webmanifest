@@ -1,0 +1,9 @@
+{
+  "name": "CodexPhone",
+  "short_name": "CodexPhone",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f5f4",
+  "theme_color": "#f3f5f4",
+  "icons": []
+}

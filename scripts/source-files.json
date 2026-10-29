@@ -1,0 +1,19 @@
+{
+  "files": [
+    ".gitignore", "LICENSE", "README.md", "SECURITY.md",
+    "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", "playwright.config.ts",
+    "Start-CodexPhone.cmd", "Pair-Phone.cmd", "Check-CodexPhone.cmd", "Restore-Standalone.cmd",
+    "apps/host/package.json", "apps/host/tsconfig.json",
+    "apps/web/package.json", "apps/web/tsconfig.json", "apps/web/vite.config.ts", "apps/web/index.html",
+    "packages/shared/package.json", "packages/shared/tsconfig.json",
+    "scripts/Common.ps1", "scripts/Build-SharedLauncher.ps1", "scripts/Start-SharedCodex.ps1",
+    "scripts/Start-Standalone.ps1", "scripts/Show-Connection.ps1", "scripts/Check-Install.ps1",
+    "scripts/shared-cli-proxy.mjs", "scripts/SharedCliLauncher.cs", "scripts/Bootstrap.cs",
+    "scripts/Build-Release.ps1", "scripts/Write-ReleaseMetadata.mjs", "scripts/Export-Source.ps1",
+    "scripts/source-files.json", "scripts/Verify-Source.mjs", "scripts/Publish-GitHub.mjs", "scripts/diagnose.mjs", "scripts/test-shared-server.mjs",
+    "docs/USER_GUIDE.md", "docs/RELEASING.md", "docs/RELEASE_NOTES.md", "docs/launcher.png"
+  ],
+  "directories": [
+    "apps/host/src", "apps/web/src", "apps/web/public", "packages/shared/src", "tests", ".github/workflows"
+  ]
+}

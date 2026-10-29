@@ -1,0 +1,26 @@
+{
+  "name": "codexphone",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @codexphone/host --filter @codexphone/web dev",
+    "build": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/host build && pnpm --filter @codexphone/web build",
+    "typecheck": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/shared typecheck && pnpm --filter @codexphone/host typecheck && pnpm --filter @codexphone/web typecheck",
+    "start": "pnpm --filter @codexphone/host start",
+    "test": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/host build && node --experimental-strip-types --test tests/core.test.mjs",
+    "diagnose": "node scripts/diagnose.mjs",
+    "test:e2e": "playwright test",
+    "test:smoke": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/host build && node tests/smoke.mjs",
+    "test:shared": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/host build && node scripts/test-shared-server.mjs",
+    "test:sync": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/host build && node tests/shared-flow.mjs && node tests/shared-host-flow.mjs && node tests/shared-adapter-flow.mjs && node tests/shared-adapter-lifecycle.mjs",
+    "test:launcher": "pnpm --filter @codexphone/shared build && pnpm --filter @codexphone/host build && node tests/shared-launcher-flow.mjs",
+    "release:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/Build-Release.ps1",
+    "release:test": "node tests/release-flow.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "typescript": "^5.9.3"
+  }
+}
