@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 if (process.platform !== "win32") process.exit(0);
 const root = await mkdtemp(path.join(tmpdir(), "codexphone-ownership-"));
 try {
-  const old = path.join(root, "old version 中文");
+  let old = path.join(root, "old version 中文");
   await mkdir(path.join(old, "apps/host/dist"), { recursive: true }); await mkdir(path.join(old, "scripts"));
+  old = await realpath(old);
   await writeFile(path.join(old, "apps/host/dist/index.js"), "");
   await writeFile(path.join(old, "apps/host/package.json"), JSON.stringify({ name: "@codexphone/host", dependencies: { "@codexphone/shared": "workspace:*" } }));
   await writeFile(path.join(old, "scripts/shared-cli-proxy.mjs"), "");
