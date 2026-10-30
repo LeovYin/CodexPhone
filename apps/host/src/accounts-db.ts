@@ -79,8 +79,8 @@ export class AccountDatabase {
   close() { this.db.close(); }
   private secretMatches(expected: string, value: string) { return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(hash(value), "hex")); }
   private username(value: unknown): string {
-    if (typeof value !== "string" || !/^[a-zA-Z0-9_.-]{3,64}$/.test(value.trim())) throw new HttpError(400, "账号使用 3–64 位字母、数字、点、下划线或短横线"); return value.trim().toLowerCase();
+    if (typeof value !== "string" || !/^[\p{L}\p{N}_.-]{2,64}$/u.test(value.trim())) throw new HttpError(400, "账号使用 2–64 位字母、数字、中文、点、下划线或短横线"); return value.trim().toLowerCase();
   }
-  private password(value: unknown): string { if (typeof value !== "string" || value.length < 12 || value.length > 256) throw new HttpError(400, "密码需要 12–256 个字符"); return value; }
+  private password(value: unknown): string { if (typeof value !== "string" || value.length < 6 || value.length > 256) throw new HttpError(400, "密码需要 6–256 个字符"); return value; }
   private installation(value: unknown): string { if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{16,100}$/.test(value)) throw new HttpError(400, "设备标识无效"); return value; }
 }

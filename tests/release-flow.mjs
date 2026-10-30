@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import net from "node:net";
 import { spawn, execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { stopOwnedProcessTree } from "./process-cleanup.mjs";
@@ -17,8 +18,20 @@ const waitFor = async (predicate, label) => {
   while (Date.now() < deadline) { if (await predicate()) return; await new Promise((resolve) => setTimeout(resolve, 50)); }
   throw new Error("Timed out: " + label);
 };
+const timedFetch = (url, options = {}) => fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(5_000) });
+const freePort = async () => {
+  const reservation = net.createServer();
+  await new Promise((resolve, reject) => { reservation.once("error", reject); reservation.listen(0, "127.0.0.1", resolve); });
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+  return port;
+};
+const waitForStopped = (url, label) => waitFor(async () => {
+  try { await timedFetch(url, { signal: AbortSignal.timeout(500) }); return false; } catch { return true; }
+}, label);
 try {
   execFileSync(executable, ["--extract-only", extracted], { windowsHide: true, timeout: 90_000, stdio: "pipe" });
+  console.log("release test: EXE extracted");
   const node = path.join(extracted, "runtime/node.exe");
   const bundledVersion = execFileSync(node, ["--version"], { encoding: "utf8", windowsHide: true }).trim();
   assert.match(bundledVersion, /^v24\./);
@@ -45,14 +58,48 @@ try {
   let accountsUrl;
   try {
     await waitFor(() => { const match = accountsLog.match(/"address":\[\{"address":"127\.0\.0\.1","family":"IPv4","port":(\d+)\}\]/); if (match) { accountsUrl = "http://127.0.0.1:" + match[1]; return true; } return false; }, "packaged SQLite account service");
-    const health = await (await fetch(accountsUrl + "/health")).json(); assert.equal(health.storage, "sqlite");
+    console.log("release test: packaged account service ready");
+    const health = await (await timedFetch(accountsUrl + "/health")).json(); assert.equal(health.storage, "sqlite"); assert.equal(health.version, "0.3.4");
     const secret = (await readFile(path.join(accountsHome, "admin-token"), "utf8")).trim();
-    const register = await fetch(accountsUrl + "/v1/register", { method: "POST", headers: { Authorization: "Bearer " + secret, "Content-Type": "application/json" }, body: JSON.stringify({ username: "release-user", password: "release-password-1234" }) }); assert.equal(register.status, 200);
-    const login = await fetch(accountsUrl + "/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "release-user", password: "release-password-1234", installationId: "release-phone-installation-001" }) }); assert.equal(login.status, 200);
+    const register = await timedFetch(accountsUrl + "/v1/register", { method: "POST", headers: { Authorization: "Bearer " + secret, "Content-Type": "application/json" }, body: JSON.stringify({ username: "张三", password: "abc123" }) }); assert.equal(register.status, 200);
+    const login = await timedFetch(accountsUrl + "/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "张三", password: "abc123", installationId: "release-phone-installation-001" }) }); assert.equal(login.status, 200);
     const db = await readFile(path.join(accountsHome, "accounts.sqlite"));
     const wal = await readFile(path.join(accountsHome, "accounts.sqlite-wal")).catch(() => Buffer.alloc(0));
-    const stored = Buffer.concat([db, wal]); assert.equal(stored.includes(Buffer.from("release-password-1234")), false); assert.equal(stored.includes(Buffer.from("release-user")), true);
+    const stored = Buffer.concat([db, wal]); assert.equal(stored.includes(Buffer.from("abc123")), false); assert.equal(stored.includes(Buffer.from("张三")), true);
+    const shutdown = await timedFetch(accountsUrl + "/admin/shutdown", { method: "POST", headers: { Authorization: "Bearer " + secret } }); assert.equal(shutdown.status, 200);
+    await waitForStopped(accountsUrl + "/health", "graceful account service upgrade shutdown");
   } finally { stopOwnedProcessTree(accounts); }
+  const upgradePort = await freePort();
+  const upgradeHome = path.join(temporary, "upgrade-account-home");
+  const upgradeEnv = { ...accountsEnv, CODEXPHONE_ACCOUNTS_HOME: upgradeHome, CODEXPHONE_ACCOUNTS_PORT: String(upgradePort) };
+  let seededService, staleService;
+  try {
+    seededService = spawn(node, [path.join(extracted, "apps/host/dist/account-service.js")], { env: upgradeEnv, cwd: extracted, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    seededService.stdout.on("data", () => {}); seededService.stderr.on("data", () => {});
+    const upgradeUrl = "http://127.0.0.1:" + upgradePort;
+    await waitFor(async () => { try { return (await (await timedFetch(upgradeUrl + "/health")).json()).version === "0.3.4"; } catch { return false; } }, "initial account service for upgrade fixture");
+    const upgradeSecret = (await readFile(path.join(upgradeHome, "admin-token"), "utf8")).trim();
+    const seeded = await timedFetch(upgradeUrl + "/v1/register", { method: "POST", headers: { Authorization: "Bearer " + upgradeSecret, "Content-Type": "application/json" }, body: JSON.stringify({ username: "survivor", password: "keep123" }) }); assert.equal(seeded.status, 200);
+    await timedFetch(upgradeUrl + "/admin/shutdown", { method: "POST", headers: { Authorization: "Bearer " + upgradeSecret } });
+    await waitForStopped(upgradeUrl + "/health", "seed account service shutdown");
+
+    const staleRoot = path.join(temporary, "stale-account-install");
+    const staleEntry = path.join(staleRoot, "apps", "host", "dist", "account-service.js");
+    await mkdir(path.dirname(staleEntry), { recursive: true });
+    await writeFile(path.join(staleRoot, "apps", "host", "package.json"), JSON.stringify({ name: "@codexphone/host", version: "0.3.3" }));
+    await writeFile(staleEntry, "import http from 'node:http'; const server=http.createServer((req,res)=>{if(req.url!=='/health'){res.writeHead(404);res.end();return}res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({product:'CodexPhone Accounts',version:'0.3.3'}));}); server.listen(Number(process.env.CODEXPHONE_ACCOUNTS_PORT),'127.0.0.1');");
+    staleService = spawn(node, [staleEntry], { env: upgradeEnv, cwd: staleRoot, windowsHide: true, stdio: ["ignore", "ignore", "pipe"] }); staleService.stderr.on("data", () => {});
+    await waitFor(async () => { try { return (await (await timedFetch(upgradeUrl + "/health")).json()).version === "0.3.3"; } catch { return false; } }, "stale account service fixture");
+    console.log("release test: stale account service fixture ready");
+    execFileSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(extracted, "scripts/Start-AccountService.ps1"), "-Port", String(upgradePort), "-AccountsHome", upgradeHome], { env: upgradeEnv, windowsHide: true, stdio: "ignore", timeout: 90_000 });
+    console.log("release test: account service launch script returned");
+    await waitFor(async () => { try { return (await (await timedFetch(upgradeUrl + "/health")).json()).version === "0.3.4"; } catch { return false; } }, "upgraded account service");
+    console.log("release test: upgraded service is healthy");
+    const relogin = await timedFetch(upgradeUrl + "/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "survivor", password: "keep123", installationId: "upgrade-survival-phone-001" }) }); assert.equal(relogin.status, 200);
+    console.log("release test: old account login passed");
+    await timedFetch(upgradeUrl + "/admin/shutdown", { method: "POST", headers: { Authorization: "Bearer " + upgradeSecret } });
+    await waitForStopped(upgradeUrl + "/health", "upgraded account service shutdown");
+  } finally { if (seededService) stopOwnedProcessTree(seededService); if (staleService) stopOwnedProcessTree(staleService); }
   const require = createRequire(path.join(extracted, "apps/host/package.json"));
   const { WebSocketServer } = require("ws");
   backend = new WebSocketServer({ port: 0, host: "127.0.0.1" });

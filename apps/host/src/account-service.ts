@@ -23,10 +23,15 @@ app.addHook("onRequest", async request => {
   }
 });
 function bearer(header: unknown) { if (typeof header !== "string" || !header.startsWith("Bearer ")) throw new HttpError(401, "请登录账号"); return header.slice(7); }
-app.get("/health", async () => ({ product: "CodexPhone Accounts", version: "0.3.2", storage: "sqlite" }));
+app.get("/health", async () => ({ product: "CodexPhone Accounts", version: "0.3.4", storage: "sqlite" }));
 app.post("/v1/register", async request => { requireAdmin(request, secret); const body = requireObject(request.body); await database.createUser(body.username, body.password); return { created: true }; });
 app.post("/v1/login", async request => database.login(requireObject(request.body)));
 app.post("/v1/logout", async request => { database.logout(bearer(request.headers.authorization)); return { signedOut: true }; });
+app.post("/admin/shutdown", async request => {
+  requireAdmin(request, secret);
+  setTimeout(() => { void closeAccounts().catch(() => process.exit(1)); }, 50);
+  return { shuttingDown: true };
+});
 app.post("/v1/host", async request => {
   const body = requireObject(request.body);
   return database.bind(bearer(request.headers.authorization), body, serviceUrl(body.url));

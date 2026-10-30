@@ -34,6 +34,18 @@ test("SQLite accounts isolate hosts, persist login and never store plaintext pas
   } finally { db?.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
+test("account registration accepts short passwords and Unicode usernames", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "phone-account-relaxed-")); let db;
+  try {
+    db = new AccountDatabase(path.join(dir, "accounts.sqlite"));
+    await db.createUser("张三", "abc123");
+    const login = await db.login({ username: "张三", password: "abc123", installationId: "fixture-phone-0001" });
+    assert.equal(login.account.username, "张三");
+    await assert.rejects(db.createUser("张", "abc123"), /账号/);
+    await assert.rejects(db.createUser("owner", "12345"), /密码/);
+  } finally { db?.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
 test("question answers preserve question IDs and replayed requests do not duplicate", async () => {
   const { ApprovalQueue } = await import("../apps/host/dist/approvals.js"); const sent = [];
   const queue = new ApprovalQueue({ transport: "websocket", respond: (...args) => sent.push(args) });

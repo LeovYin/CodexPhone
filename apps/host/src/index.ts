@@ -180,14 +180,14 @@ host.addHook("onRequest", async (request) => {
   }
 });
 host.get("/api/health", async () => ({ ...hostStatus, activeTasks: activeTurns.size, pairedDevices: store.list().length }));
-host.get("/api/capabilities", async () => ({ hostVersion: "0.3.2", protocolVersion: 1, capabilities: ["idempotent-send", "operation-status", "global-approvals", "websocket-ticket", "media", "message-queue", "latest-history", "account-login", "device-permissions"], requestRetentionDays: 7 }));
+host.get("/api/capabilities", async () => ({ hostVersion: "0.3.4", protocolVersion: 1, capabilities: ["idempotent-send", "operation-status", "global-approvals", "websocket-ticket", "media", "message-queue", "latest-history", "account-login", "device-permissions"], requestRetentionDays: 7 }));
 host.get<{ Params: { requestId: string } }>("/api/operations/:requestId", async (request) => {
   const entry = operations.get(requireDevice(request).id, request.params.requestId);
   if (!entry) throw new HttpError(404, "Request not found");
   return { requestId: entry.requestId, state: entry.state, result: entry.result, error: entry.error };
 });
 host.post("/api/pair", async (request) => { if (await binding(stateDir)) throw new HttpError(410, "此电脑已启用账号登录，请使用账号连接"); const body = requireObject(request.body); return store.pair(body.code, body.name); });
-host.get("/api/auth/info", async () => ({ mode: await binding(stateDir) ? "account" : "legacy", hostVersion: "0.3.2" }));
+host.get("/api/auth/info", async () => ({ mode: await binding(stateDir) ? "account" : "legacy", hostVersion: "0.3.4" }));
 host.post("/api/account/connect", async request => {
   const body = requireObject(request.body); if (typeof body.token !== "string") throw new HttpError(400, "请先登录账号");
   const identity = await authorizeAccount(stateDir, { token: body.token });
@@ -202,7 +202,7 @@ host.post("/api/account/login", async request => {
 });
 host.get("/api/admin/status", async () => {
   const configured = await binding(stateDir);
-  return { ...hostStatus, hostVersion: "0.3.2", activeTasks: activeTurns.size, devices: store.list(),
+  return { ...hostStatus, hostVersion: "0.3.4", activeTasks: activeTurns.size, devices: store.list(),
     account: configured ? { username: configured.username, name: configured.name, url: configured.url, accountsUrl: configured.accountsUrl } : null };
 });
 host.post("/api/admin/account", async request => {
