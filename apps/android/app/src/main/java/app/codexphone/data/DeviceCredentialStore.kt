@@ -28,45 +28,73 @@ class DeviceCredentialStore(context: Context) {
     val deviceId: String? get() = string("device-id")
     val accountsUrl: String? get() = string("accounts-url")
     val username: String? get() = string("account-username")
+    val activeUsername: String? get() = string("active-account-username") ?: username
+    val computerUrl: String get() = string("computer-url").orEmpty()
+    val connectionPaused: Boolean get() = preferences.getBoolean("connection-paused", false)
+    private val conversationScope: String? get() = string("conversation-scope")
     fun rememberedServers(): List<RememberedAccountServer> = runCatching {
         val saved = org.json.JSONArray(string("remembered-account-servers") ?: "[]")
         (0 until saved.length()).mapNotNull { index ->
             val item = saved.optJSONObject(index) ?: return@mapNotNull null
             val url = item.optString("url").takeIf(String::isNotBlank) ?: return@mapNotNull null
             val name = item.optString("username").takeIf(String::isNotBlank) ?: return@mapNotNull null
-            RememberedAccountServer(url, name)
+            RememberedAccountServer(url, name, item.optString("computerUrl"))
         }
     }.getOrDefault(emptyList())
     val installationId: String get() = string("installation-id") ?: java.util.UUID.randomUUID().toString().also { preferences.edit().putString("installation-id", it).commit() }
     fun accountToken(): String? = string("account-token")?.let { runCatching { decrypt(it) }.getOrNull() }
-    fun saveAccount(url: String, username: String, token: String) {
-        val server = RememberedAccountServer(url.trimEnd('/'), username.trim())
+    fun saveAccount(url: String, username: String, token: String, computerUrl: String = "") {
+        val server = RememberedAccountServer(url.trimEnd('/'), username.trim(), computerUrl.trimEnd('/'))
         val updated = (listOf(server) + rememberedServers().filterNot { it.url.equals(server.url, true) && it.username.equals(server.username, true) }).take(10)
-        val packed = org.json.JSONArray().apply { updated.forEach { put(org.json.JSONObject().put("url", it.url).put("username", it.username)) } }.toString()
+        val packed = packServers(updated)
         check(preferences.edit().putString("accounts-url", server.url).putString("account-username", server.username)
-            .putString("remembered-account-servers", packed).putString("account-token", encrypt(token)).commit())
+            .putString("active-account-username", server.username)
+            .putString("computer-url", server.computerUrl).putString("remembered-account-servers", packed).putString("account-token", encrypt(token)).commit())
     }
     fun selectAccountServer(server: RememberedAccountServer) {
-        val editor = preferences.edit().putString("accounts-url", server.url).putString("account-username", server.username)
+        val editor = preferences.edit().putString("accounts-url", server.url).putString("account-username", server.username).putString("computer-url", server.computerUrl)
+        if (string("active-account-username") == null && token() != null) editor.putString("active-account-username", username)
         if (!accountsUrl.equals(server.url, true) || !username.equals(server.username, true)) editor.remove("account-token")
         check(editor.commit())
     }
     fun removeRememberedServer(url: String, username: String) {
         val updated = rememberedServers().filterNot { it.url.equals(url, true) && it.username.equals(username, true) }
-        val packed = org.json.JSONArray().apply { updated.forEach { put(org.json.JSONObject().put("url", it.url).put("username", it.username)) } }.toString()
+        val packed = packServers(updated)
         val editor = preferences.edit().putString("remembered-account-servers", packed)
         if (accountsUrl.equals(url, true) && this.username.equals(username, true)) {
             val fallback = updated.firstOrNull()
-            editor.putString("accounts-url", fallback?.url ?: "").putString("account-username", fallback?.username ?: "").remove("account-token")
+            editor.putString("accounts-url", fallback?.url ?: "").putString("account-username", fallback?.username ?: "").putString("computer-url", fallback?.computerUrl ?: "").remove("account-token")
         }
         check(editor.commit())
     }
     fun saveSession(host: String, token: String, deviceId: String) {
         check(preferences.edit().putString(KEY_HOST, host).putString("device-id", deviceId)
-            .putString(KEY_TOKEN, encrypt(token)).commit()) { "无法保存设备凭据" }
+            .putString(KEY_TOKEN, encrypt(token)).putBoolean("connection-paused", false).commit()) { "无法保存设备凭据" }
     }
+    fun pauseConnection() { check(preferences.edit().putBoolean("connection-paused", true).commit()) }
+    private fun packServers(servers: List<RememberedAccountServer>): String = org.json.JSONArray().apply {
+        servers.forEach { put(org.json.JSONObject().put("url", it.url).put("username", it.username).put("computerUrl", it.computerUrl)) }
+    }.toString()
+
+    @Synchronized fun activateConversationProfile(accountId: String, hostId: String, migrateLegacy: Boolean) {
+        val scope = java.security.MessageDigest.getInstance("SHA-256")
+            .digest((accountId + "\n" + hostId).encodeToByteArray()).joinToString("") { "%02x".format(it) }
+        if (scope == conversationScope) return
+        val movingLegacy = conversationScope == null && migrateLegacy
+        val target = File(directory, "connections/$scope").apply { mkdirs() }
+        if (movingLegacy) {
+            listOf("conversation-cache.enc", "submission-journal.enc").forEach { name ->
+                val source = File(directory, name)
+                if (source.exists()) source.copyTo(File(target, name), overwrite = true)
+            }
+        }
+        check(preferences.edit().putString("conversation-scope", scope).commit())
+        if (movingLegacy) listOf("conversation-cache.enc", "submission-journal.enc").forEach { AtomicFile(File(directory, it)).delete() }
+    }
+    private fun documentFile(name: String): File = conversationScope?.let { File(directory, "connections/$it/$name") } ?: File(directory, name)
     fun readLocal(): String? {
-        if (File(directory, "conversation-cache.enc").exists()) return if (skipDisplayCache) null else readDocument("conversation-cache.enc")
+        if (documentFile("conversation-cache.enc").exists()) return if (skipDisplayCache) null else readDocument("conversation-cache.enc")
+        if (conversationScope != null) return null
         val old = string("local-state") ?: return null
         if (old.length > 2_000_000) {
             // Preserve the old encrypted blob for recovery; never retry decoding
@@ -83,9 +111,9 @@ class DeviceCredentialStore(context: Context) {
         writeDocument("conversation-cache.enc", value)
         preferences.edit().remove("local-state").apply()
     }
-    fun clearDisplayCache() { AtomicFile(File(directory, "conversation-cache.enc")).delete() }
+    fun clearDisplayCache() { AtomicFile(documentFile("conversation-cache.enc")).delete() }
     private fun readDocument(name: String): String? {
-        val file = AtomicFile(File(directory, name))
+        val file = AtomicFile(documentFile(name))
         return runCatching {
             file.openRead().use { input ->
                 val output = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
@@ -97,10 +125,10 @@ class DeviceCredentialStore(context: Context) {
                 check(bytes.size <= 2_000_000)
                 decrypt(bytes.decodeToString())
             }
-        }.onFailure { if (File(directory, name).exists()) recoveredData = true }.getOrNull()
+        }.onFailure { if (documentFile(name).exists()) recoveredData = true }.getOrNull()
     }
     private fun writeDocument(name: String, value: String) {
-        val file = AtomicFile(File(directory, name)); val stream = file.startWrite()
+        val file = AtomicFile(documentFile(name)); val stream = file.startWrite()
         try { stream.write(encrypt(value).encodeToByteArray()); file.finishWrite(stream) }
         catch (failure: Exception) { file.failWrite(stream); throw failure }
     }
@@ -138,8 +166,8 @@ class DeviceCredentialStore(context: Context) {
     }
 
     fun clearToken() {
-        preferences.edit().remove(KEY_TOKEN).remove("device-id").remove("local-state").remove("account-token").commit()
-        listOf("conversation-cache.enc", "submission-journal.enc").forEach { AtomicFile(File(directory, it)).delete() }
+        preferences.edit().remove(KEY_TOKEN).remove("device-id").remove("local-state").remove("account-token").remove("connection-paused").commit()
+        listOf("conversation-cache.enc", "submission-journal.enc").forEach { AtomicFile(documentFile(it)).delete() }
     }
 
     private fun key(): SecretKey {

@@ -14,6 +14,7 @@ class CredentialRecoveryTest {
     private val app get() = ApplicationProvider.getApplicationContext<Application>()
     @Before @After fun clean() {
         app.getSharedPreferences("device-connection", 0).edit().clear().commit()
+        File(app.filesDir, "connections").deleteRecursively()
         listOf("conversation-cache.enc", "submission-journal.enc", "legacy-state-quarantined.enc").forEach { AtomicFile(File(app.filesDir, it)).delete() }
     }
     @Test fun corruptDisplayCachePreservesLoginDraftAndUncertainSubmission() {
@@ -51,5 +52,40 @@ class CredentialRecoveryTest {
         credentials.removeRememberedServer("http://100.64.0.1:4321", "alice")
         Assert.assertEquals("bob", credentials.username)
         Assert.assertEquals(1, credentials.rememberedServers().size)
+    }
+    @Test fun disconnectPersistsAcrossRestartAndProfilesIsolateDraftsAndUncertainSubmissions() {
+        val credentials = DeviceCredentialStore(app)
+        credentials.activateConversationProfile("account-a", "computer-a", false)
+        credentials.saveSession("http://192.168.1.20:4318", "fixture-device-token", "device")
+        credentials.saveAccount("http://192.168.1.20:4321", "alice", "fixture-account-token", "http://192.168.1.20:4318")
+        val original = ConversationStore(credentials)
+        original.draft("shared", "切换网络前的草稿")
+        original.pending(PendingSubmission("fixture-uncertain-request-0001", "shared", null, "已经发送，请先查询", null, null))
+        credentials.pauseConnection()
+        val restarted = DeviceCredentialStore(app)
+        Assert.assertTrue(restarted.connectionPaused)
+        Assert.assertEquals("fixture-device-token", restarted.token())
+        Assert.assertEquals("fixture-account-token", restarted.accountToken())
+        Assert.assertEquals("http://192.168.1.20:4318", restarted.rememberedServers().single().computerUrl)
+        val switched = ConversationStore(restarted)
+        switched.activateProfile("account-b", "computer-b", false)
+        Assert.assertEquals("", switched.draft("shared"))
+        Assert.assertNull(switched.data.pending)
+        switched.draft("shared", "另一台电脑的草稿"); switched.persist()
+        switched.activateProfile("account-a", "computer-a", false)
+        Assert.assertEquals("切换网络前的草稿", switched.draft("shared"))
+        Assert.assertEquals("fixture-uncertain-request-0001", switched.data.pending?.requestId)
+        credentials.saveSession("http://100.64.0.1:4318", "renewed-device-token", "device")
+        Assert.assertFalse(credentials.connectionPaused)
+    }
+    @Test fun legacyJournalMigratesWithoutLosingAnUncertainSubmission() {
+        val credentials = DeviceCredentialStore(app)
+        val legacy = ConversationStore(credentials)
+        legacy.draft("shared", "升级前的草稿")
+        legacy.pending(PendingSubmission("fixture-legacy-request-0001", "shared", null, "待确认内容", null, null))
+        legacy.activateProfile("account-a", "computer-a", true)
+        val restored = ConversationStore(DeviceCredentialStore(app))
+        Assert.assertEquals("升级前的草稿", restored.draft("shared"))
+        Assert.assertEquals("fixture-legacy-request-0001", restored.data.pending?.requestId)
     }
 }

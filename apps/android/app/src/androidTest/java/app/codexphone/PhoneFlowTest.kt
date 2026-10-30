@@ -47,17 +47,20 @@ class PhoneFlowTest {
     @Volatile private var questionMode = false
     @Volatile private var loginGatewayFailure = false
     private val answers = CopyOnWriteArrayList<JsonObject>()
+    private val requests = CopyOnWriteArrayList<String>()
     private val questionRequest = """{"id":"approval","threadId":"shared","turnId":"turn","kind":"question","title":"Codex 需要你的回答","detail":"","canAccept":true,"questions":[{"id":"platform","question":"选择客户端","secret":false,"options":[{"label":"原生安卓","description":"Kotlin"},{"label":"网页","description":"浏览器"}]},{"id":"notes","question":"补充要求","secret":false,"options":[]}]}"""
     private val request = """{"id":"approval","threadId":"shared","turnId":"turn","kind":"command","title":"允许执行测试命令？","detail":"echo fixture","canAccept":true,"questions":[]}"""
     @Before fun setup() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         app.getSharedPreferences("device-connection", 0).edit().clear().commit()
+        File(app.filesDir, "connections").deleteRecursively()
         listOf("conversation-cache.enc", "submission-journal.enc", "last-crash.txt", "previous-crash.txt").forEach { name ->
             android.util.AtomicFile(File(app.filesDir, name)).delete()
         }
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(r: RecordedRequest): MockResponse {
                 val path = r.path.orEmpty().substringBefore('?')
+                requests.add(r.method + " " + path)
                 if (path == "/v1/login" && loginGatewayFailure) return MockResponse().setResponseCode(502)
                     .setHeader("Content-Type", "text/html").setBody("<html>fixture upstream unavailable</html>")
                 if (path == "/ws") return MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
@@ -164,6 +167,47 @@ class PhoneFlowTest {
         compose.onNodeWithText("查看诊断").performClick()
         compose.onNodeWithText("POST /v1/login", substring = true).assertExists()
         screenshot("login-error-036-test.png")
+    }
+    @Test fun disconnectAndSwitchAddressKeepsTasksAndRestoresTheSameComputerDraft() {
+        connected()
+        val origin = server.url("/").newBuilder().host("127.0.0.1").build().toString()
+        compose.runOnIdle { vm.disconnectServer(); vm.editAccounts(origin); vm.editComputerUrl(origin); vm.login("fixture-user", "fixture-password") }
+        compose.waitUntil(15000) { vm.state.value.paired && !vm.state.value.busy }
+        compose.runOnIdle { vm.openThread("shared") }
+        compose.waitUntil(10000) { vm.state.value.selectedThread != null }
+        compose.runOnIdle { vm.editDraft("局域网切换后继续写"); vm.closeThread() }
+        compose.onNodeWithText("设置", useUnmergedTree = true).performClick()
+        screenshot("settings-037-test.png")
+        compose.onNodeWithText("断开服务器").performScrollTo().performClick()
+        compose.waitUntil(5000) { !vm.state.value.paired }
+        compose.onNodeWithText("账号服务地址").assertExists()
+        compose.onNodeWithText("电脑任务地址（可选）").assertExists()
+        screenshot("disconnect-037-test.png")
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        Assert.assertTrue(DeviceCredentialStore(app).connectionPaused)
+        val restored = PhoneViewModel(app)
+        Assert.assertFalse("Paused connections must not reconnect after process restart", restored.state.value.paired)
+        MockWebServer().use { alternate ->
+            // The registered desktop address is deliberately unreachable. The phone's
+            // selected entry must control the route, without changing global binding.
+            alternate.enqueue(MockResponse().setBody("""{"token":"account-token","expiresAt":9999999999999,"account":{"id":"fixture-account","username":"fixture-user"},"host":{"id":"host","name":"电脑","url":"http://127.0.0.1:1"}}"""))
+            alternate.start()
+            val alternateOrigin = alternate.url("/").newBuilder().host("127.0.0.1").build().toString()
+            compose.runOnIdle {
+                restored.editAccounts(alternateOrigin)
+                restored.editComputerUrl(origin); restored.login("fixture-user", "fixture-password")
+            }
+            compose.waitUntil(15000) { restored.state.value.paired && !restored.state.value.busy || restored.state.value.error != null }
+            Assert.assertTrue(restored.state.value.error, restored.state.value.paired)
+            compose.runOnIdle { restored.openThread("shared") }
+            compose.waitUntil(10000) { restored.state.value.selectedThread != null }
+            Assert.assertEquals("局域网切换后继续写", restored.state.value.draft)
+            Assert.assertEquals(2, restored.state.value.rememberedServers.size)
+            Assert.assertEquals(origin, restored.state.value.hostUrl)
+            Assert.assertTrue(requests.none { it == "POST /v1/logout" || it.startsWith("DELETE /api/devices/") || it.endsWith("/interrupt") })
+            Assert.assertEquals("/v1/login", alternate.takeRequest().path)
+            restored.disconnectServer()
+        }
     }
     @After fun cleanup() {
         vm.setForeground(false)

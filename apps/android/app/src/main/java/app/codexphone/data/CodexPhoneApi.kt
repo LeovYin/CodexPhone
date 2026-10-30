@@ -96,6 +96,7 @@ class CodexPhoneApi(
         awaitClose { socket.cancel() }
     }
     fun imageClient(): OkHttpClient = client
+    fun cancelRequests() { client.dispatcher.cancelAll() }
 
     private suspend inline fun <reified T> get(path: String, query: Map<String, String?> = emptyMap()): T = execute("GET", path, query = query)
     private suspend inline fun <reified T> post(path: String, body: JsonObject, authenticated: Boolean = true): T =

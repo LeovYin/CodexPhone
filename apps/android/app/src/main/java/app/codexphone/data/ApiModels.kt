@@ -7,7 +7,7 @@ import kotlinx.serialization.json.JsonElement
 @Serializable data class AccountHost(val id: String, val name: String, val url: String)
 @Serializable data class AccountUser(val id: String, val username: String)
 @Serializable data class AccountLogin(val token: String, val expiresAt: Long, val account: AccountUser, val host: AccountHost? = null)
-data class RememberedAccountServer(val url: String, val username: String)
+data class RememberedAccountServer(val url: String, val username: String, val computerUrl: String = "")
 @Serializable data class HostStatus(
     val status: String = "starting", val codexVersion: String = "unknown",
     val model: String = "unknown", val provider: String = "unknown", val transport: String? = null,

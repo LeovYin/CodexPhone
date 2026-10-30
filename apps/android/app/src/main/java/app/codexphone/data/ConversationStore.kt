@@ -32,5 +32,10 @@ class ConversationStore(private val credentials: DeviceCredentialStore) {
         credentials.saveLocal(json.encodeToString(data), json.encodeToString(data.copy(threads = emptyList(), details = emptyList())))
     }
     @Synchronized fun clearDisplayCache() { data = data.copy(threads = emptyList(), details = emptyList()); credentials.clearDisplayCache() }
+    @Synchronized fun activateProfile(accountId: String, hostId: String, migrateLegacy: Boolean) {
+        persist()
+        credentials.activateConversationProfile(accountId, hostId, migrateLegacy)
+        data = load()
+    }
     @Synchronized fun clear() { data = LocalData(); credentials.clearToken() }
 }

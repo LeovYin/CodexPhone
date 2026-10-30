@@ -53,8 +53,8 @@ private val Background = Color(0xFFF4F7FF)
 fun CodexPhoneApp(vm: PhoneViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
-    var confirmLogout by remember { mutableStateOf(false) }
     var deferredQuestion by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(state.paired) { if (!state.paired) { tab = 0; deferredQuestion = null } }
     val question = state.approvals.firstOrNull { it.kind == "question" && it.id != deferredQuestion }
     BackHandler(state.selectedThreadId != null || state.composingNew) { vm.closeThread() }
     when {
@@ -74,15 +74,11 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
             }) { padding ->
             when (tab) {
                 1 -> ApprovalInbox(state, vm, Modifier.padding(padding))
-                2 -> SettingsScreen(state, vm, { confirmLogout = true }, Modifier.padding(padding))
+                2 -> SettingsScreen(state, vm, Modifier.padding(padding))
                 else -> ThreadListScreen(state, vm, Modifier.padding(padding))
             }
         }
     }
-    if (confirmLogout) AlertDialog(onDismissRequest = { confirmLogout = false }, title = { Text("退出当前账号？") },
-        text = { Text("会撤销这台手机的电脑连接并清除本机对话数据。已记住的账号服务器和用户名会保留，之后可以直接选择并重新登录。") },
-        confirmButton = { TextButton({ confirmLogout = false; vm.logout() }) { Text("退出登录") } },
-        dismissButton = { TextButton({ confirmLogout = false }) { Text("取消") } })
     if (question != null) Dialog({ deferredQuestion = question.id }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth().padding(16.dp), shape = RoundedCornerShape(18.dp)) {
             Column(Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()).padding(12.dp)) {
@@ -100,6 +96,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     var username by remember { mutableStateOf(s.username) }
     var password by remember { mutableStateOf("") }
     var serverMenu by remember { mutableStateOf(false) }
+    var computerOptions by remember(s.disconnected) { mutableStateOf(s.disconnected || s.computerUrl.isNotBlank()) }
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
     val errorTarget = remember { BringIntoViewRequester() }
@@ -112,10 +109,10 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         }
         Spacer(Modifier.height(24.dp))
         Text("电脑上的任务，\n随身继续。", fontSize = 29.sp, lineHeight = 38.sp, color = Ink, fontWeight = FontWeight.Bold)
-        Text("登录电脑管理中心使用的账号，自动找到绑定的电脑。", Modifier.padding(top = 12.dp, bottom = 28.dp), color = Muted, lineHeight = 22.sp)
+        Text(if (s.disconnected) "已断开服务器。选择家里的局域网地址，或外出使用的 Tailscale 地址，再登录同一账号。" else "登录电脑管理中心使用的账号，自动找到绑定的电脑。", Modifier.padding(top = 12.dp, bottom = 20.dp), color = Muted, lineHeight = 22.sp)
         Box {
             OutlinedTextField(s.accountsUrl, vm::editAccounts, Modifier.fillMaxWidth(), label = { Text("账号服务地址") },
-                placeholder = { Text("http://100.x.x.x:4321") }, singleLine = true,
+                placeholder = { Text("http://192.168.x.x:4321 或 Tailscale 地址") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), enabled = !s.busy,
                 trailingIcon = { if (s.rememberedServers.isNotEmpty()) IconButton(onClick = { serverMenu = true }, enabled = !s.busy) {
                     Icon(Icons.Default.ArrowDropDown, contentDescription = "选择已记住的服务器")
@@ -125,9 +122,21 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
                     DropdownMenuItem(text = { Column {
                         Text(server.username, fontWeight = FontWeight.SemiBold, color = Ink)
                         Text(server.url, color = Muted, fontSize = 12.sp)
-                    } }, onClick = { username = server.username; vm.selectAccountServer(server); serverMenu = false })
+                        if (server.computerUrl.isNotBlank()) Text("电脑：" + server.computerUrl, color = Muted, fontSize = 12.sp)
+                    } }, onClick = { username = server.username; password = ""; vm.selectAccountServer(server); computerOptions = server.computerUrl.isNotBlank(); serverMenu = false })
                 }
             }
+        }
+        TextButton({ computerOptions = !computerOptions }, enabled = !s.busy) {
+            Text(if (computerOptions) "收起电脑任务地址" else if (s.computerUrl.isBlank()) "电脑任务地址：使用账号登记地址" else "电脑任务地址：已自定义")
+        }
+        if (computerOptions) {
+            OutlinedTextField(s.computerUrl, vm::editComputerUrl, Modifier.fillMaxWidth(), label = { Text("电脑任务地址（可选）") },
+                placeholder = { Text("留空使用账号登记地址") }, singleLine = true, enabled = !s.busy,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
+            TextButton(vm::useSameComputerAddress, enabled = !s.busy && s.accountsUrl.isNotBlank()) { Text("使用同一服务器的 4318 端口") }
+            Text("账号服务和 Codex 在同一台电脑时可一键填写；如果分开部署或使用其他端口，请填写实际电脑地址。局域网与 Tailscale 入口会分别记住。",
+                color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
         }
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(username, { username = it }, Modifier.fillMaxWidth(), label = { Text("账号") }, singleLine = true, enabled = !s.busy,
@@ -145,7 +154,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         }
         s.connectionStep?.let { Text(it, Modifier.padding(top = 12.dp), color = Blue, fontSize = 13.sp) }
         Box(Modifier.fillMaxWidth().bringIntoViewRequester(errorTarget)) { s.error?.let { ErrorMessage(it) } }
-        Text("先在电脑管理中心开始连接并创建账号。手机填写管理中心显示的账号服务地址（默认端口 4321）；4318 是电脑任务连接端口。请先开启 Tailscale。", Modifier.padding(top = 18.dp), color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
+        Text("账号服务默认端口 4321，电脑任务连接默认端口 4318。在家可用同一 Wi-Fi / 局域网，外出使用 Tailscale；更换入口后需要重新登录，密码不会保存。", Modifier.padding(top = 18.dp), color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         Text("CodexPhone " + BuildConfig.VERSION_NAME, Modifier.padding(top = 24.dp), color = Muted, fontSize = 12.sp)
     }
 }
@@ -233,13 +242,14 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     }
 }
 
-@Composable private fun SettingsScreen(s: PhoneUiState, vm: PhoneViewModel, forget: () -> Unit, modifier: Modifier) {
+@Composable private fun SettingsScreen(s: PhoneUiState, vm: PhoneViewModel, modifier: Modifier) {
     var confirmRevoke by remember { mutableStateOf(false) }
     Column(modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(20.dp)) {
         Text("连接与设置", color = Ink, fontSize = 25.sp, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(24.dp))
         Text("当前电脑", color = Muted, fontSize = 12.sp)
         Text(s.hostUrl, Modifier.padding(top = 6.dp), color = Ink)
+        if (s.accountsUrl.isNotBlank()) Text("账号服务：" + s.accountsUrl, Modifier.padding(top = 8.dp), color = Muted, fontSize = 13.sp)
         Text(if (s.realtime) "实时连接已建立" else "实时连接暂不可用，返回前台会自动重试",
             Modifier.padding(top = 10.dp), color = if (s.realtime) Color(0xFF176B62) else Muted, fontSize = 13.sp)
         HorizontalDivider(Modifier.padding(vertical = 20.dp), color = Line)
@@ -249,14 +259,16 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         HorizontalDivider(Modifier.padding(vertical = 20.dp), color = Line)
         Text("手机离线或退到后台时，电脑任务仍会继续。重新打开应用后自动补齐状态；本版不承诺锁屏实时通知。", color = Muted, fontSize = 14.sp, lineHeight = 22.sp)
         Spacer(Modifier.height(24.dp))
+        Button(vm::disconnectServer, Modifier.fillMaxWidth(), enabled = !s.sending) { Text("断开服务器") }
+        Text("只断开手机连接，电脑任务和排队消息继续运行；保留服务器记录与本机草稿，返回连接页后可切换局域网 / Tailscale 地址。",
+            Modifier.padding(top = 8.dp, bottom = 16.dp), color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         OutlinedButton({ confirmRevoke = true }, Modifier.fillMaxWidth(), enabled = !s.sending) { Text("退出登录") }
-        TextButton(forget, Modifier.fillMaxWidth(), enabled = !s.sending) { Text("电脑无法连接？仅清除本机连接") }
         OutlinedButton(vm::resetDisplayCache, Modifier.fillMaxWidth(), enabled = !s.busy) { Text("重置对话缓存，保留登录与草稿") }
         s.error?.let { ErrorMessage(it) }
         Text("CodexPhone " + BuildConfig.VERSION_NAME + " · MIT 开源", Modifier.padding(top = 20.dp), color = Muted, fontSize = 12.sp)
     }
     if (confirmRevoke) AlertDialog(onDismissRequest = { confirmRevoke = false }, title = { Text("退出当前账号？") },
-        text = { Text("会撤销这台手机的电脑连接并清除本机对话数据。已记住的服务器地址和账号会保留。未确认的提交仍可能在电脑上执行，请先检查任务。") },
+        text = { Text("会撤销这台手机的电脑连接并清除当前电脑的本机对话数据。已记住的服务器地址和账号会保留。未确认的提交仍可能在电脑上执行，请先检查任务。") },
         confirmButton = { TextButton({ confirmRevoke = false; vm.logout() }) { Text("退出登录") } },
         dismissButton = { TextButton({ confirmRevoke = false }) { Text("取消") } })
 }
