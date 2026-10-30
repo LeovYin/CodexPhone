@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { digest, digestEqual, HttpError, secretEqual } from "./security.js";
 import { isRecord } from "@codexphone/shared";
 
-interface Device { id: string; name: string; tokenHash: string; createdAt: string }
+interface Device { id: string; name: string; tokenHash: string; createdAt: string; accountId?: string; sessionId?: string; installationId?: string; expiresAt?: number; permission?: "control" | "read"; blocked?: boolean; lastSeen?: string }
 export class DeviceStore {
   private devices: Device[] = [];
   favorites = new Set<string>();
@@ -28,9 +28,27 @@ export class DeviceStore {
     this.pairing = { code: randomBytes(18).toString("base64url"), expiresAt: Date.now() + 10 * 60_000, failures: 0, consumed: false };
     return this.pairingInfo;
   }
-  authenticate(token: string | undefined): Device | undefined { return token ? this.devices.find((device) => digestEqual(device.tokenHash, digest(token))) : undefined; }
-  hasDevice(id: string): boolean { return this.devices.some((device) => device.id === id); }
-  list(): Array<Omit<Device, "tokenHash">> { return this.devices.map(({ id, name, createdAt }) => ({ id, name, createdAt })); }
+  authenticate(token: string | undefined): Device | undefined {
+    const device = token ? this.devices.find((device) => digestEqual(device.tokenHash, digest(token)) && !device.blocked && (!device.expiresAt || device.expiresAt > Date.now())) : undefined;
+    if (device) device.lastSeen = new Date().toISOString(); return device;
+  }
+  authorizedDevice(id: string): Device | undefined { return this.devices.find(device => device.id === id && !device.blocked && (!device.expiresAt || device.expiresAt > Date.now())); }
+  hasDevice(id: string): boolean { const device = this.authorizedDevice(id); return !!device && device.permission !== "read"; }
+  list(): Array<Omit<Device, "tokenHash">> { return this.devices.map(({ tokenHash: _secret, ...device }) => ({ ...device })); }
+  async accountSession(identity: { accountId: string; sessionId: string; installationId: string; name: string; expiresAt: number }): Promise<{ token: string; deviceId: string }> {
+    const existing = this.devices.find(device => device.accountId === identity.accountId && device.installationId === identity.installationId);
+    if (existing?.blocked) throw new HttpError(403, "此手机已被电脑禁用，请在电脑连接管理中恢复权限");
+    if (!existing && this.devices.length >= 32) throw new HttpError(409, "手机连接过多，请在电脑管理中心移除旧连接");
+    const token = randomBytes(32).toString("base64url");
+    const device: Device = existing || { id: randomUUID(), name: identity.name, tokenHash: "", createdAt: new Date().toISOString(), permission: "control" };
+    Object.assign(device, identity, { tokenHash: digest(token), lastSeen: new Date().toISOString() });
+    if (!existing) this.devices.push(device); await this.save(); return { token, deviceId: device.id };
+  }
+  async updatePermission(id: string, permission: unknown): Promise<void> {
+    const device = this.devices.find(device => device.id === id); if (!device) throw new HttpError(404, "手机连接不存在");
+    if (permission !== "control" && permission !== "read" && permission !== "blocked") throw new HttpError(400, "权限无效");
+    device.blocked = permission === "blocked"; device.permission = permission === "read" ? "read" : "control"; await this.save();
+  }
   async pair(code: unknown, name: unknown): Promise<{ token: string; deviceId: string }> {
     if (this.pairing.consumed || this.pairing.failures >= 8 || Date.now() > this.pairing.expiresAt) throw new HttpError(410, "Pairing code expired or used; generate another code on the computer");
     if (typeof code !== "string" || !secretEqual(code, this.pairing.code)) { this.pairing.failures++; throw new HttpError(401, "Invalid pairing code"); }

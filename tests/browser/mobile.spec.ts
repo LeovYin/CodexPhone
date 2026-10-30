@@ -109,6 +109,27 @@ test("lost queue response is reconciled after reload without a duplicate submiss
   expect(state.posts.filter((entry: { pathname: string }) => entry.pathname.endsWith("/turns"))).toHaveLength(0);
 });
 
+test("Agent questions appear from the task list and submit every answer", async ({ page }) => {
+  const state = await setupFixture(page);
+  await page.goto("/");
+  await expect.poll(() => state.sockets.length).toBeGreaterThan(0);
+  state.approvals = [{ id: "question", threadId: "one", turnId: "turn", kind: "question", title: "Codex 需要你的回答", detail: "", canAccept: true, questions: [
+    { id: "platform", question: "选择客户端", secret: false, options: [{ label: "原生安卓", description: "Kotlin" }, { label: "网页", description: "浏览器" }] },
+    { id: "notes", question: "补充要求", secret: false, options: [] }
+  ] }];
+  state.sockets.at(-1).send(JSON.stringify({ type: "approval-requested" }));
+  const dialog = page.getByRole("dialog", { name: "Agent 正在等待回答" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "提交回答" })).toBeDisabled();
+  await dialog.getByRole("button", { name: /原生安卓/ }).click();
+  await dialog.getByLabel("你的回答").last().fill("继续执行任务");
+  await dialog.getByRole("button", { name: "提交回答" }).click();
+  await expect(dialog).toHaveCount(0);
+  const answer = state.posts.find((p: { pathname: string }) => p.pathname === "/api/approvals/question");
+  expect(answer.body).toEqual({ answers: { platform: "原生安卓", notes: "继续执行任务" } });
+  expect(state.posts.some((p: { pathname: string }) => p.pathname.endsWith("/turns"))).toBe(false);
+});
+
 test("project filters, favorites, pagination, approvals and unpair controls", async ({ page }) => {
   const state = await setupFixture(page); state.more = true;
   state.approvals = [{ id: "approval", threadId: "one", turnId: "turn", kind: "command", title: "允许执行命令", detail: "echo test", canAccept: true, questions: [] }];

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -17,7 +17,7 @@ const port = reservation.address().port; await new Promise((resolve) => reservat
 const url = `ws://127.0.0.1:${port}`;
 await writeFile(path.join(codexHome, "config.toml"), `model = "codexphone-fixture"\nmodel_provider = "fixture"\n[model_providers.fixture]\nname = "Local fixture"\nbase_url = "${provider.url}"\nwire_api = "responses"\nrequires_openai_auth = false\n`);
 const startBackend = () => { const child = spawn(process.env.CODEX_BIN || "codex", ["app-server", "--listen", url], { env: { ...process.env, CODEX_HOME: codexHome }, stdio: ["ignore", "ignore", "pipe"], windowsHide: true }); child.stderr.on("data", () => {}); return child; };
-let backend = startBackend(), desktop, runtime;
+let backend = startBackend(), desktop, runtime, accounts;
 const waitFor = async (predicate, label) => { const deadline = Date.now() + 20_000; while (Date.now() < deadline) { if (await predicate()) return; await new Promise((resolve) => setTimeout(resolve, 100)); } throw new Error(`Timed out: ${label}`); };
 try {
   await waitFor(async () => { try { desktop = await AppServerClient.connect(url); return true; } catch { return false; } }, "initial backend");
@@ -82,8 +82,39 @@ try {
   const earlier = await request(`threads/${threadId}?cursor=${encodeURIComponent(latest.nextCursor)}`);
   assert.ok(earlier.turns.length > 0);
   assert.ok(!earlier.turns.some(t => latest.turns.some(recent => recent.id === t.id)));
-  console.log(JSON.stringify({ authenticatedPhoneSend: "passed", queueAndExplicitGuidance: "passed", latestHistoryPagination: "passed", duplicateSubmission: "passed", operationStatus: "passed", desktopReceivesPhoneTurn: "passed", subscriptionSurvivesCompletion: "passed", backendRestartRecovery: "passed", pairingPreserved: (await request("health")).pairedDevices === 1, externalApiCalls: 0 }));
+  // Exercise the independent SQLite service and local-only desktop management API.
+  Object.assign(process.env, { CODEXPHONE_ACCOUNTS_HOME: path.join(root, "accounts"), CODEXPHONE_ACCOUNTS_BIND: "127.0.0.1", CODEXPHONE_ACCOUNTS_PORT: "0" });
+  accounts = await import("../apps/host/dist/account-service.js");
+  const accountsUrl = `http://127.0.0.1:${accounts.app.server.address().port}`;
+  const admin = (await readFile(path.join(phoneHome, "admin-token"), "utf8")).trim();
+  const call = async (url, method = "GET", body, token) => {
+    const response = await fetch(url, { method, headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body ? { "Content-Type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, body: await response.json() };
+  };
+  assert.equal((await call(base + "/api/admin/status")).status, 403);
+  assert.equal((await call(base + "/api/admin/account", "POST", { accountsUrl, url: base, username: "fixture-owner", password: "fixture-password-1234", name: "Fixture computer", register: true }, admin)).status, 200);
+  assert.equal((await call(base + "/api/capabilities", "GET", undefined, paired.token)).status, 401, "Binding disables legacy pairing tokens");
+  assert.equal((await call(base + "/api/pair", "POST", { code: "unused" })).status, 410);
+  const loggedIn = await call(accountsUrl + "/v1/login", "POST", { username: "fixture-owner", password: "fixture-password-1234", installationId: "fixture-phone-0001", name: "Fixture phone" });
+  assert.equal(loggedIn.status, 200); assert.equal(loggedIn.body.host.url, base);
+  const connected = await call(base + "/api/account/connect", "POST", { token: loggedIn.body.token }); assert.equal(connected.status, 200);
+  const phoneToken = connected.body.token, deviceId = connected.body.deviceId;
+  assert.equal((await call(base + "/api/capabilities", "GET", undefined, phoneToken)).status, 200);
+  assert.equal((await call(base + `/api/admin/devices/${deviceId}/permission`, "POST", { permission: "read" }, admin)).status, 200);
+  assert.equal((await call(base + "/api/threads", "POST", { prompt: "must not run" }, phoneToken)).status, 403);
+  const ticket = await call(base + "/api/ws-ticket", "GET", undefined, phoneToken); assert.equal(ticket.status, 200);
+  const socket = new WebSocket(base.replace("http:", "ws:") + "/ws?ticket=" + ticket.body.ticket);
+  try {
+    await new Promise((resolve, reject) => { const timer = setTimeout(() => reject(new Error("read-only socket timeout")), 3000); socket.addEventListener("message", e => { clearTimeout(timer); assert.equal(JSON.parse(e.data).type, "connected"); resolve(); }, { once: true }); socket.addEventListener("error", reject, { once: true }); });
+    await call(accountsUrl + "/v1/logout", "POST", {}, loggedIn.body.token);
+    await waitFor(() => socket.readyState === WebSocket.CLOSED, "central logout closes existing event stream");
+    assert.equal((await call(base + "/api/capabilities", "GET", undefined, phoneToken)).status, 403);
+  } finally { socket.close(); }
+  await call(base + `/api/admin/devices/${deviceId}/permission`, "POST", { permission: "blocked" }, admin);
+  const relogin = await call(accountsUrl + "/v1/login", "POST", { username: "fixture-owner", password: "fixture-password-1234", installationId: "fixture-phone-0001" });
+  assert.equal((await call(base + "/api/account/connect", "POST", { token: relogin.body.token })).status, 403, "Blocked phone cannot regain access by logging in again");
+  console.log(JSON.stringify({ authenticatedPhoneSend: "passed", queueAndExplicitGuidance: "passed", latestHistoryPagination: "passed", duplicateSubmission: "passed", operationStatus: "passed", desktopReceivesPhoneTurn: "passed", subscriptionSurvivesCompletion: "passed", backendRestartRecovery: "passed", sqliteAccountLogin: "passed", readOnlyEvents: "passed", centralLogoutAndBlockedRelogin: "passed", externalApiCalls: 0 }));
 } finally {
-  desktop?.close(); if (runtime) await runtime.closeHost(); stopOwnedProcessTree(backend); await provider.close();
+  desktop?.close(); if (runtime) await runtime.closeHost(); if (accounts) await accounts.closeAccounts(); stopOwnedProcessTree(backend); await provider.close();
   await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });
 }

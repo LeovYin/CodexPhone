@@ -30,6 +30,7 @@ async function setupFixture(page) {
     }
     if (pathname === "/api/health") return json({ status: state.backendOffline ? "degraded" : "ready", transport: "websocket", model: "a", provider: "custom", codexVersion: "fixture", authMode: "apiKey", lastError: null });
     if (pathname.endsWith("/queue")) return json({ messages: state.queue });
+    if (pathname === "/api/approvals") return json({ approvals: state.approvals });
     if (pathname.startsWith("/api/operations/")) return state.operations[pathname.split("/").at(-1)] ? json(state.operations[pathname.split("/").at(-1)]) : json({ error: "Request not found" }, 404);
     if (state.backendOffline) return json({ error: "Backend unavailable" }, 503);
     if (pathname === "/api/projects") return json({ projects: [{ id: "project", name: "CodexPhone", path: "D:/workspace", canStart: true }] });

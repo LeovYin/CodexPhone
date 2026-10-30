@@ -28,6 +28,7 @@ try {
   assert.equal(ico.readUInt16LE(2), 1); assert.equal(ico.readUInt16LE(4), 7);
   assert.ok((await readFile(path.join(extracted, "apps/web/dist/icons/icon.svg"), "utf8")).includes("CodexPhone"));
   assert.ok((await readFile(path.join(extracted, "THIRD-PARTY-NOTICES.txt"), "utf8")).includes("react"));
+  assert.ok((await readFile(path.join(extracted, "apps/host/dist/account-service.js"), "utf8")).includes("CodexPhone Accounts"));
   const minimalPath = path.join(process.env.SystemRoot, "System32") + ";" + path.join(process.env.SystemRoot, "System32/WindowsPowerShell/v1.0");
   const env = { ...process.env, PATH: minimalPath, Path: minimalPath };
   for (const key of Object.keys(env)) if (key.startsWith("CODEX") || key.startsWith("BROWSER_USE_")) delete env[key];
@@ -37,6 +38,21 @@ try {
   execFileSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(extracted, "scripts/Build-SharedLauncher.ps1"), "-CodexExecutable", node], { env, windowsHide: true, stdio: "pipe" });
   const shim = path.join(extracted, ".codexphone/launcher/codexphone-cli.exe");
   assert.equal(execFileSync(shim, ["--version"], { env, windowsHide: true, encoding: "utf8" }).trim(), bundledVersion);
+  const accountsHome = path.join(temporary, "account-service-data");
+  const accountsEnv = { ...env, CODEXPHONE_ACCOUNTS_HOME: accountsHome, CODEXPHONE_ACCOUNTS_BIND: "127.0.0.1", CODEXPHONE_ACCOUNTS_PORT: "0" };
+  const accounts = spawn(node, [path.join(extracted, "apps/host/dist/account-service.js")], { env: accountsEnv, cwd: extracted, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  let accountsLog = ""; accounts.stdout.on("data", chunk => { accountsLog += chunk.toString(); }); accounts.stderr.on("data", () => {});
+  let accountsUrl;
+  try {
+    await waitFor(() => { const match = accountsLog.match(/"address":\[\{"address":"127\.0\.0\.1","family":"IPv4","port":(\d+)\}\]/); if (match) { accountsUrl = "http://127.0.0.1:" + match[1]; return true; } return false; }, "packaged SQLite account service");
+    const health = await (await fetch(accountsUrl + "/health")).json(); assert.equal(health.storage, "sqlite");
+    const secret = (await readFile(path.join(accountsHome, "admin-token"), "utf8")).trim();
+    const register = await fetch(accountsUrl + "/v1/register", { method: "POST", headers: { Authorization: "Bearer " + secret, "Content-Type": "application/json" }, body: JSON.stringify({ username: "release-user", password: "release-password-1234" }) }); assert.equal(register.status, 200);
+    const login = await fetch(accountsUrl + "/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "release-user", password: "release-password-1234", installationId: "release-phone-installation-001" }) }); assert.equal(login.status, 200);
+    const db = await readFile(path.join(accountsHome, "accounts.sqlite"));
+    const wal = await readFile(path.join(accountsHome, "accounts.sqlite-wal")).catch(() => Buffer.alloc(0));
+    const stored = Buffer.concat([db, wal]); assert.equal(stored.includes(Buffer.from("release-password-1234")), false); assert.equal(stored.includes(Buffer.from("release-user")), true);
+  } finally { stopOwnedProcessTree(accounts); }
   const require = createRequire(path.join(extracted, "apps/host/package.json"));
   const { WebSocketServer } = require("ws");
   backend = new WebSocketServer({ port: 0, host: "127.0.0.1" });

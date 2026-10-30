@@ -9,6 +9,8 @@ export class ApprovalQueue {
   list(threadId?: string): ApprovalRequest[] { return [...this.pending.values()].filter((entry) => threadId === undefined || entry.publicRequest.threadId === threadId).map((entry) => entry.publicRequest); }
   remove(originalId: unknown): void { for (const [id, entry] of this.pending) if (entry.original.id === originalId) this.pending.delete(id); }
   add(original: ServerRequest): ApprovalRequest | null {
+    const existing = [...this.pending.values()].find(entry => entry.original.id === original.id);
+    if (existing) return existing.publicRequest;
     const p = original.params;
     if (typeof p.threadId !== "string" || typeof p.turnId !== "string") {
       if (this.client.transport !== "websocket") this.client.reject(original.id, "Client does not support this request");
@@ -33,7 +35,7 @@ export class ApprovalQueue {
       return [{ id: q.id, question: q.question, secret: q.isSecret === true, options: (Array.isArray(q.options) ? q.options : []).filter(isRecord).flatMap((option) => typeof option.label === "string" ? [{ label: option.label, description: typeof option.description === "string" ? option.description : "" }] : []) }];
     });
     const detail = [p.reason, p.command, p.cwd, p.grantRoot, p.networkApprovalContext ? JSON.stringify(p.networkApprovalContext) : null, kind[0] === "permissions" ? JSON.stringify(p.permissions) : null].filter((value): value is string => typeof value === "string").join("\n").slice(0, 12000);
-    const request: ApprovalRequest = { id: randomUUID(), threadId: p.threadId, turnId: p.turnId, kind: kind[0], title: kind[1], detail, canAccept: !Array.isArray(p.availableDecisions) || p.availableDecisions.includes("accept"), questions };
+    const request: ApprovalRequest = { id: randomUUID(), threadId: p.threadId, turnId: p.turnId, kind: kind[0], title: kind[1], detail, canAccept: kind[0] === "question" || !Array.isArray(p.availableDecisions) || p.availableDecisions.includes("accept"), questions };
     this.pending.set(request.id, { publicRequest: request, original });
     return request;
   }

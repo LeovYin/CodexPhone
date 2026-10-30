@@ -4,6 +4,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
 
 @Serializable data class PairResponse(val token: String, val deviceId: String)
+@Serializable data class AccountHost(val id: String, val name: String, val url: String)
+@Serializable data class AccountUser(val id: String, val username: String)
+@Serializable data class AccountLogin(val token: String, val expiresAt: Long, val account: AccountUser, val host: AccountHost? = null)
 @Serializable data class HostStatus(
     val status: String = "starting", val codexVersion: String = "unknown",
     val model: String = "unknown", val provider: String = "unknown", val transport: String? = null,

@@ -1,17 +1,19 @@
 import Fastify, { type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { HostStatus, ModelOption, Project, ThreadDetail, ThreadSummary } from "@codexphone/shared";
 import { isRecord } from "@codexphone/shared";
 import { AppServerClient, type ServerRequest } from "./app-server.js";
 import { ApprovalQueue } from "./approvals.js";
 import { OperationStore } from "./operations.js";
 import { MessageQueue } from "./queue.js";
+import { adminSecret, requireAdmin } from "./local-admin.js";
+import { accountRequest, authorizeAccount, binding, serviceUrl, type HostBinding } from "./account-client.js";
 import { normalizeThread, normalizeTurn, pageData, stringOrNull } from "./normalize.js";
 import { modelSelection, normalizeModel } from "./models.js";
 import { readImage } from "./media.js";
@@ -25,6 +27,8 @@ const stateDir = path.resolve(process.env.CODEXPHONE_HOME || path.join(homedir()
 const store = new DeviceStore(stateDir);
 const operations = new OperationStore(stateDir);
 const messageQueue = new MessageQueue(stateDir);
+const managementSecret = await adminSecret(stateDir);
+const accountChecks = new Map<string, number>();
 const projectStore = new ProjectStore(stateDir);
 const port = Number(process.env.PORT || 4318);
 const bindHost = process.env.HOST || "0.0.0.0";
@@ -71,7 +75,7 @@ let hostStatus: HostStatus = { status: "starting", codexVersion: "unknown", mode
 
 function emit(event: unknown): void { const payload = JSON.stringify(event); for (const socket of sockets) if (socket.readyState === socket.OPEN) socket.send(payload); }
 function token(request: FastifyRequest): string | undefined { const value = request.headers.authorization; return typeof value === "string" && value.startsWith("Bearer ") ? value.slice(7) : undefined; }
-function requireDevice(request: FastifyRequest): { id: string } { const device = store.authenticate(token(request)); if (!device) throw new HttpError(401, "Device is not paired"); return { id: device.id }; }
+function requireDevice(request: FastifyRequest) { const device = store.authenticate(token(request)); if (!device) throw new HttpError(401, "登录已失效，请重新登录账号"); return device; }
 function server(): AppServerClient { if (!appServer) throw new HttpError(503, "Codex App Server is unavailable; check the computer host"); return appServer; }
 function isActiveWriterConflict(error: unknown): boolean { return error instanceof Error && error.message.includes("already has an active writer"); }
 function explainThreadWriteError(error: unknown, threadId: string): never {
@@ -138,6 +142,16 @@ function pumpQueue(threadId: string): void {
       const next = messageQueue.list(threadId).find(e => e.state === "queued");
       if (!next) return;
       if (!store.hasDevice(next.deviceId)) { await messageQueue.cancel(next.id, threadId); emit({ type: "queue-updated", threadId }); return; }
+      const device = store.authorizedDevice(next.deviceId)!;
+      if (device.sessionId) {
+        try { await authorizeAccount(stateDir, { sessionId: device.sessionId }); }
+        catch (error) {
+          if (error instanceof HttpError && [401, 403, 404, 409].includes(error.statusCode)) {
+            await messageQueue.cancel(next.id, threadId); emit({ type: "queue-updated", threadId });
+          }
+          return; // An unavailable account service leaves the message queued.
+        }
+      }
       const entry = await messageQueue.claim(next.id, threadId);
       emit({ type: "queue-updated", threadId });
       try {
@@ -153,17 +167,110 @@ function publicNotification(method: string, params: Record<string, unknown>): un
   const threadId = stringOrNull(params.threadId); if (method === "item/agentMessage/delta") return { type: "agent-delta", threadId, turnId: stringOrNull(params.turnId), itemId: stringOrNull(params.itemId), delta: typeof params.delta === "string" ? params.delta : typeof params.text === "string" ? params.text : "" }; if (method === "turn/started" || method === "turn/completed") return { type: "turn-status", method, threadId, turnId: stringOrNull(isRecord(params.turn) ? params.turn.id : params.turnId), status: isRecord(params.turn) ? params.turn.status ?? null : params.status ?? null }; if (method === "item/completed" || method === "item/started") return { type: "item-status", method, threadId, turnId: stringOrNull(params.turnId), itemId: stringOrNull(params.itemId), itemType: stringOrNull(params.itemType) }; if (method === "serverRequest/resolved") return { type: "approval-resolved", threadId, requestId: params.requestId ?? null }; return null;
 }
 
-host.addHook("onRequest", async (request) => { if (!originAllowed(request.headers.origin, request.headers.host, allowedOrigins)) throw new HttpError(403, "Origin is not allowed"); if (request.url.startsWith("/api/") && !request.url.startsWith("/api/health") && !request.url.startsWith("/api/pair")) requireDevice(request); });
+host.addHook("onRequest", async (request) => {
+  if (!originAllowed(request.headers.origin, request.headers.host, allowedOrigins)) throw new HttpError(403, "Origin is not allowed");
+  const route = request.url.split("?")[0]!;
+  if (route.startsWith("/api/admin/")) { requireAdmin(request, managementSecret); return; }
+  if (route.startsWith("/api/") && !["/api/health", "/api/pair", "/api/account/connect", "/api/account/login", "/api/auth/info"].includes(route)) {
+    const device = requireDevice(request);
+    if (device.sessionId && (accountChecks.get(device.sessionId) || 0) < Date.now()) {
+      await authorizeAccount(stateDir, { sessionId: device.sessionId }); accountChecks.set(device.sessionId, Date.now() + 10000);
+    }
+    if (device.permission === "read" && !["GET", "HEAD"].includes(request.method) && route !== "/api/ws-ticket" && !(request.method === "DELETE" && route === "/api/devices/" + device.id)) throw new HttpError(403, "此手机只有查看权限，请在电脑管理中心调整");
+  }
+});
 host.get("/api/health", async () => ({ ...hostStatus, activeTasks: activeTurns.size, pairedDevices: store.list().length }));
-host.get("/api/capabilities", async () => ({ hostVersion: "0.2.1", protocolVersion: 1, capabilities: ["idempotent-send", "operation-status", "global-approvals", "websocket-ticket", "media", "message-queue", "latest-history"], requestRetentionDays: 7 }));
+host.get("/api/capabilities", async () => ({ hostVersion: "0.3.0", protocolVersion: 1, capabilities: ["idempotent-send", "operation-status", "global-approvals", "websocket-ticket", "media", "message-queue", "latest-history", "account-login", "device-permissions"], requestRetentionDays: 7 }));
 host.get<{ Params: { requestId: string } }>("/api/operations/:requestId", async (request) => {
   const entry = operations.get(requireDevice(request).id, request.params.requestId);
   if (!entry) throw new HttpError(404, "Request not found");
   return { requestId: entry.requestId, state: entry.state, result: entry.result, error: entry.error };
 });
-host.post("/api/pair", async (request) => { const body = requireObject(request.body); return store.pair(body.code, body.name); });
+host.post("/api/pair", async (request) => { if (await binding(stateDir)) throw new HttpError(410, "此电脑已启用账号登录，请使用账号连接"); const body = requireObject(request.body); return store.pair(body.code, body.name); });
+host.get("/api/auth/info", async () => ({ mode: await binding(stateDir) ? "account" : "legacy", hostVersion: "0.3.0" }));
+host.post("/api/account/connect", async request => {
+  const body = requireObject(request.body); if (typeof body.token !== "string") throw new HttpError(400, "请先登录账号");
+  const identity = await authorizeAccount(stateDir, { token: body.token });
+  return store.accountSession(identity);
+});
+host.post("/api/account/login", async request => {
+  const body = requireObject(request.body); const configured = await binding(stateDir);
+  if (!configured) throw new HttpError(409, "请先在电脑管理中心绑定账号");
+  const loggedIn = await accountRequest<{ token: string; account: { username: string } }>(configured.accountsUrl, "/v1/login", { username: body.username, password: body.password, installationId: body.installationId, name: body.name, kind: "web" });
+  const identity = await authorizeAccount(stateDir, { token: loggedIn.token });
+  return { ...await store.accountSession(identity), username: loggedIn.account.username };
+});
+host.get("/api/admin/status", async () => {
+  const configured = await binding(stateDir);
+  return { ...hostStatus, hostVersion: "0.3.0", activeTasks: activeTurns.size, devices: store.list(),
+    account: configured ? { username: configured.username, name: configured.name, url: configured.url, accountsUrl: configured.accountsUrl } : null };
+});
+host.post("/api/admin/account", async request => {
+  const body = requireObject(request.body), accountsUrl = serviceUrl(body.accountsUrl), url = serviceUrl(body.url);
+  let installation: string;
+  try { installation = await readFile(path.join(stateDir, "installation-id"), "utf8"); }
+  catch(e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; installation = randomUUID(); await writeFile(path.join(stateDir, "installation-id"), installation, { mode: 0o600 }); }
+  if (body.register === true) {
+    if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(accountsUrl).hostname)) throw new HttpError(400, "请在账号服务所在电脑创建账号，再到本机登录");
+    const accountsDirectory = path.resolve(process.env.CODEXPHONE_ACCOUNTS_HOME || path.join(homedir(), ".codexphone", "accounts"));
+    await accountRequest(accountsUrl, "/v1/register", { username: body.username, password: body.password }, await adminSecret(accountsDirectory));
+  }
+  const login = await accountRequest<{ token: string }>(accountsUrl, "/v1/login", { username: body.username, password: body.password, installationId: installation, name: body.name, kind: "desktop" });
+  try {
+    const previous = await binding(stateDir);
+    if (previous && previous.accountsUrl !== accountsUrl) throw new HttpError(409, "请先解除当前账号绑定再更换账号服务");
+    if (previous && previous.username !== String(body.username).trim().toLowerCase()) throw new HttpError(409, "请先解除当前账号绑定再更换账号");
+    const registered = await accountRequest<Omit<HostBinding, "accountsUrl">>(accountsUrl, "/v1/host", { installationId: installation, name: body.name, url, previousHostSecret: previous?.secret }, login.token);
+    const temporary = path.join(stateDir, "account-host.tmp");
+    await writeFile(temporary, JSON.stringify({ ...registered, accountsUrl }), { mode: 0o600 }); await rename(temporary, path.join(stateDir, "account-host.json"));
+    accountChecks.clear();
+    for (const device of store.list()) if (!device.accountId) await store.updatePermission(device.id, "blocked");
+    for (const socket of sockets) socket.close(1008, "Account binding updated");
+    return { bound: true, username: registered.username };
+  } finally { await accountRequest(accountsUrl, "/v1/logout", {}, login.token).catch(() => {}); }
+});
+host.post<{ Params: { id: string } }>("/api/admin/devices/:id/permission", async request => {
+  await store.updatePermission(request.params.id, requireObject(request.body).permission);
+  for (const [socket, id] of socketDevices) if (id === request.params.id) socket.close(1008, "Device permissions changed");
+  for (const message of messageQueue.list()) if (message.deviceId === request.params.id && message.state === "queued" && !store.hasDevice(message.deviceId)) await messageQueue.cancel(message.id, message.threadId);
+  emit({ type: "queue-updated" }); return { updated: true };
+});
+host.delete("/api/admin/account", async () => {
+  const configured = await binding(stateDir); if (!configured) return { unbound: true };
+  await accountRequest(configured.accountsUrl, "/v1/hosts/" + encodeURIComponent(configured.id) + "/unbind", {}, configured.secret);
+  await unlink(path.join(stateDir, "account-host.json")); accountChecks.clear();
+  for (const device of store.list()) if (device.accountId) await store.updatePermission(device.id, "blocked");
+  for (const socket of sockets) socket.close(1008, "Computer unbound"); return { unbound: true };
+});
+host.delete<{ Params: { id: string } }>("/api/admin/devices/:id", async request => {
+  await store.updatePermission(request.params.id, "blocked");
+  for (const [socket, id] of socketDevices) if (id === request.params.id) socket.close(1008, "Device revoked");
+  return { revoked: true };
+});
 host.get("/api/ws-ticket", async (request) => { const device = requireDevice(request); const ticket = randomBytes(36).toString("base64url"); wsTickets.set(ticket, { deviceId: device.id, expiresAt: Date.now() + 30_000 }); return { ticket }; });
-host.get("/ws", { websocket: true }, (socket, request) => { const query = request.query as { ticket?: string }; const entry = typeof query?.ticket === "string" ? wsTickets.get(query.ticket) : undefined; if (typeof query?.ticket === "string") wsTickets.delete(query.ticket); if (!entry || entry.expiresAt < Date.now() || !store.hasDevice(entry.deviceId)) { socket.close(1008, "Invalid WebSocket ticket"); return; } sockets.add(socket); socketDevices.set(socket, entry.deviceId); socket.on("close", () => { sockets.delete(socket); socketDevices.delete(socket); }); socket.on("error", () => { sockets.delete(socket); socketDevices.delete(socket); }); socket.send(JSON.stringify({ type: "connected", deviceId: entry.deviceId })); });
+host.get("/ws", { websocket: true }, (socket, request) => {
+  const query = request.query as { ticket?: string };
+  const entry = typeof query?.ticket === "string" ? wsTickets.get(query.ticket) : undefined;
+  if (typeof query?.ticket === "string") wsTickets.delete(query.ticket);
+  const device = entry && store.authorizedDevice(entry.deviceId);
+  if (!entry || entry.expiresAt < Date.now() || !device) { socket.close(1008, "Invalid WebSocket ticket"); return; }
+  // Install handlers synchronously, before awaiting authorization.
+  let closed = false, checking = false;
+  const cleanup = () => { closed = true; clearInterval(timer); sockets.delete(socket); socketDevices.delete(socket); };
+  socket.on("close", cleanup); socket.on("error", cleanup);
+  const validate = async () => {
+    if (closed || checking) return; checking = true;
+    try {
+      const current = store.authorizedDevice(entry.deviceId);
+      if (!current || current.sessionId !== device.sessionId) throw new Error("Session expired");
+      if (current.sessionId) await authorizeAccount(stateDir, { sessionId: current.sessionId });
+      if (closed) return;
+      if (!sockets.has(socket)) { sockets.add(socket); socketDevices.set(socket, entry.deviceId); socket.send(JSON.stringify({ type: "connected", deviceId: entry.deviceId })); }
+    } catch { sockets.delete(socket); socketDevices.delete(socket); socket.close(1008, "Session expired or unavailable"); }
+    finally { checking = false; }
+  };
+  const timer = setInterval(() => void validate(), 10000); timer.unref(); void validate();
+});
 host.get("/api/projects", async () => ({ projects: await knownProjects() }));
 host.post("/api/projects", async (request) => {
   const project = await projectStore.upsert(requireObject(request.body));
@@ -299,6 +406,9 @@ async function connectServer(): Promise<void> {
     client.on("serverRequest", (request: ServerRequest) => {
       const approval = approvals!.add(request); if (approval) emit({ type: "approval-requested", approval });
     });
+    // Initialization can replay an already-blocking question before listeners
+    // are attached. Preserve it so reconnecting phones can answer it as well.
+    for (const request of client.outstandingRequests()) approvals.add(request);
     client.on("notification", (notification: { method: string; params: Record<string, unknown> }) => {
       if (notification.method === "serverRequest/resolved") approvals!.remove(notification.params.requestId);
       const threadId = stringOrNull(notification.params.threadId);

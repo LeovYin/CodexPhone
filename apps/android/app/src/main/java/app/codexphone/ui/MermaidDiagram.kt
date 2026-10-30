@@ -5,6 +5,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.RenderProcessGoneDetail
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -64,6 +65,12 @@ fun splitMermaidBlocks(text: String): List<MarkdownBlock> {
             settings.domStorageEnabled = false; settings.blockNetworkLoads = true
             settings.setSupportZoom(true); settings.builtInZoomControls = true; settings.displayZoomControls = false
             webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    (view.parent as? android.view.ViewGroup)?.removeView(view)
+                    view.destroy()
+                    // A failed isolated renderer must not terminate the chat process.
+                    return true
+                }
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = true
                 override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse =
                     if (request.url.toString() == "https://codexphone.invalid/mermaid.js")

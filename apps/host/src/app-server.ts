@@ -13,6 +13,8 @@ export class AppServerClient extends EventEmitter {
   private requestId = 0;
   private pending = new Map<number, PendingRequest>();
   private closed = false;
+  private serverRequests = new Map<number | string, ServerRequest>();
+  outstandingRequests(): ServerRequest[] { return [...this.serverRequests.values()]; }
   metadata = { model: "unknown", provider: "unknown", authMode: "unknown", version: "unknown" };
 
   readonly transport: "stdio" | "websocket";
@@ -102,8 +104,8 @@ export class AppServerClient extends EventEmitter {
   }
 
   notify(method: string, params: Record<string, unknown>): void { this.write({ method, params }); }
-  respond(id: number | string, result: unknown): void { this.write({ id, result }); }
-  reject(id: number | string, message: string): void { this.write({ id, error: { code: -32601, message } }); }
+  respond(id: number | string, result: unknown): void { this.serverRequests.delete(id); this.write({ id, result }); }
+  reject(id: number | string, message: string): void { this.serverRequests.delete(id); this.write({ id, error: { code: -32601, message } }); }
 
   close(): void {
     if (this.closed) return;
@@ -132,8 +134,13 @@ export class AppServerClient extends EventEmitter {
       // Server requests have IDs too: dispatch by method before matching our request IDs.
       if (typeof message.method === "string") {
         const params = isRecord(message.params) ? message.params : {};
-        if (typeof message.id === "number" || typeof message.id === "string") this.emit("serverRequest", { id: message.id, method: message.method, params });
-        else this.emit("notification", { method: message.method, params });
+        if (typeof message.id === "number" || typeof message.id === "string") {
+          const request = { id: message.id, method: message.method, params };
+          this.serverRequests.set(message.id, request); this.emit("serverRequest", request);
+        } else {
+          if (message.method === "serverRequest/resolved" && (typeof params.requestId === "string" || typeof params.requestId === "number")) this.serverRequests.delete(params.requestId);
+          this.emit("notification", { method: message.method, params });
+        }
       } else if (typeof message.id === "number") {
         const pending = this.pending.get(message.id); if (!pending) continue;
         clearTimeout(pending.timer); this.pending.delete(message.id);

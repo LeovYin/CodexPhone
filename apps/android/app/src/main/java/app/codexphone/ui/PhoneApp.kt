@@ -52,6 +52,8 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var confirmForget by remember { mutableStateOf(false) }
+    var deferredQuestion by remember { mutableStateOf<String?>(null) }
+    val question = state.approvals.firstOrNull { it.kind == "question" && it.id != deferredQuestion }
     BackHandler(state.selectedThreadId != null || state.composingNew) { vm.closeThread() }
     when {
         !state.paired -> PairScreen(state, vm)
@@ -79,10 +81,21 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         text = { Text("会清除手机上的凭据、缓存与草稿。若无法连接电脑，电脑端的设备授权仍需在电脑上撤销。") },
         confirmButton = { TextButton({ confirmForget = false; vm.forgetLocally() }) { Text("清除本机连接") } },
         dismissButton = { TextButton({ confirmForget = false }) { Text("取消") } })
+    if (question != null) Dialog({ deferredQuestion = question.id }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxWidth().padding(16.dp), shape = RoundedCornerShape(18.dp)) {
+            Column(Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()).padding(12.dp)) {
+                Text("Agent 正在等待回答", fontWeight = FontWeight.Bold, color = Ink, modifier = Modifier.padding(12.dp))
+                ApprovalCard(question, state.busy, vm)
+                TextButton({ deferredQuestion = question.id }) { Text("稍后在待处理中回答") }
+                state.error?.let { ErrorMessage(it) }
+            }
+        }
+    }
 }
 
 @Composable private fun PairScreen(s: PhoneUiState, vm: PhoneViewModel) {
-    var code by remember { mutableStateOf("") }
+    var username by remember { mutableStateOf(s.username) }
+    var password by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().background(Background).statusBarsPadding().navigationBarsPadding()
         .imePadding().verticalScroll(rememberScrollState()).padding(24.dp)) {
         Spacer(Modifier.height(36.dp))
@@ -91,19 +104,21 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         }
         Spacer(Modifier.height(24.dp))
         Text("电脑上的任务，\n随身继续。", fontSize = 29.sp, lineHeight = 38.sp, color = Ink, fontWeight = FontWeight.Bold)
-        Text("先打开手机 Tailscale，再启动电脑上的共享连接。", Modifier.padding(top = 12.dp, bottom = 28.dp), color = Muted, lineHeight = 22.sp)
-        OutlinedTextField(s.hostUrl, vm::editHost, Modifier.fillMaxWidth(), label = { Text("电脑地址") },
-            placeholder = { Text("http://100.x.x.x:4318") }, singleLine = true,
+        Text("登录电脑管理中心使用的账号，自动找到绑定的电脑。", Modifier.padding(top = 12.dp, bottom = 28.dp), color = Muted, lineHeight = 22.sp)
+        OutlinedTextField(s.accountsUrl, vm::editAccounts, Modifier.fillMaxWidth(), label = { Text("账号服务地址") },
+            placeholder = { Text("http://100.x.x.x:4321") }, singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri), enabled = !s.busy)
         Spacer(Modifier.height(12.dp))
-        OutlinedTextField(code, { code = it }, Modifier.fillMaxWidth(), label = { Text("一次性配对码") },
+        OutlinedTextField(username, { username = it }, Modifier.fillMaxWidth(), label = { Text("账号") }, singleLine = true, enabled = !s.busy)
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth(), label = { Text("密码") },
             singleLine = true, visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false), enabled = !s.busy)
-        Button({ vm.pair(code) }, Modifier.fillMaxWidth().padding(top = 20.dp).height(52.dp), enabled = !s.busy) {
-            if (s.busy) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp) else Text("配对并连接")
+        Button({ vm.login(username, password) }, Modifier.fillMaxWidth().padding(top = 20.dp).height(52.dp), enabled = !s.busy && username.isNotBlank() && password.isNotEmpty()) {
+            if (s.busy) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp) else Text("登录并连接电脑")
         }
         s.error?.let { ErrorMessage(it) }
-        Text("使用你电脑上原有的模型配置。手机只保存加密的设备凭据。", Modifier.padding(top = 18.dp), color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
+        Text("首次在电脑创建账号并绑定工作站。手机保持登录，无需反复输入配对码。请先开启 Tailscale。", Modifier.padding(top = 18.dp), color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         Text("CodexPhone " + BuildConfig.VERSION_NAME, Modifier.padding(top = 24.dp), color = Muted, fontSize = 12.sp)
     }
 }
@@ -126,6 +141,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
 @Composable private fun ThreadListScreen(s: PhoneUiState, vm: PhoneViewModel, modifier: Modifier) {
     Column(modifier.fillMaxSize()) {
         Header("CodexPhone", if (s.realtime) "与电脑实时同步" else "等待连接 · 缓存可浏览", s, vm)
+        s.notice?.let { Info(it) }
         Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(s.query, vm::search, Modifier.weight(1f), placeholder = { Text("搜索电脑对话") },
                 singleLine = true, leadingIcon = { Icon(Icons.Default.Search, null) }, shape = RoundedCornerShape(14.dp))
@@ -185,6 +201,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         Spacer(Modifier.height(24.dp))
         OutlinedButton({ confirmRevoke = true }, Modifier.fillMaxWidth(), enabled = !s.sending) { Text("撤销配对并清除手机数据") }
         TextButton(forget, Modifier.fillMaxWidth(), enabled = !s.sending) { Text("电脑无法连接？仅清除本机连接") }
+        OutlinedButton(vm::resetDisplayCache, Modifier.fillMaxWidth(), enabled = !s.busy) { Text("重置对话缓存，保留登录与草稿") }
         s.error?.let { ErrorMessage(it) }
         Text("CodexPhone " + BuildConfig.VERSION_NAME + " · MIT 开源", Modifier.padding(top = 20.dp), color = Muted, fontSize = 12.sp)
     }

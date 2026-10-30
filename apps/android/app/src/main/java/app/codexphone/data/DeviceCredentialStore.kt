@@ -9,22 +9,72 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import android.util.AtomicFile
+import java.io.File
+import app.codexphone.CodexPhoneApplication
 
 class DeviceCredentialStore(context: Context) {
+    private val directory = context.filesDir
+    val skipDisplayCache = (context.applicationContext as? CodexPhoneApplication)?.recoveredAfterCrash == true
+    var recoveredData = skipDisplayCache
+        private set
     private val preferences = context.getSharedPreferences("device-connection", Context.MODE_PRIVATE)
+    private fun string(key: String): String? = runCatching { preferences.getString(key, null) }.getOrNull()
 
     var hostUrl: String?
-        get() = preferences.getString(KEY_HOST, null)
+        get() = string(KEY_HOST)
         set(value) { preferences.edit().putString(KEY_HOST, value).apply() }
 
-    val deviceId: String? get() = preferences.getString("device-id", null)
+    val deviceId: String? get() = string("device-id")
+    val accountsUrl: String? get() = string("accounts-url")
+    val username: String? get() = string("account-username")
+    val installationId: String get() = string("installation-id") ?: java.util.UUID.randomUUID().toString().also { preferences.edit().putString("installation-id", it).commit() }
+    fun accountToken(): String? = string("account-token")?.let { runCatching { decrypt(it) }.getOrNull() }
+    fun saveAccount(url: String, username: String, token: String) {
+        check(preferences.edit().putString("accounts-url", url).putString("account-username", username).putString("account-token", encrypt(token)).commit())
+    }
     fun saveSession(host: String, token: String, deviceId: String) {
         check(preferences.edit().putString(KEY_HOST, host).putString("device-id", deviceId)
             .putString(KEY_TOKEN, encrypt(token)).commit()) { "无法保存设备凭据" }
     }
-    fun readLocal(): String? = preferences.getString("local-state", null)?.let { runCatching { decrypt(it) }.getOrNull() }
-    fun saveLocal(value: String) {
-        check(preferences.edit().putString("local-state", encrypt(value)).commit()) { "无法保存本地状态" }
+    fun readLocal(): String? {
+        if (File(directory, "conversation-cache.enc").exists()) return if (skipDisplayCache) null else readDocument("conversation-cache.enc")
+        val old = string("local-state") ?: return null
+        if (old.length > 2_000_000) {
+            // Preserve the old encrypted blob for recovery; never retry decoding
+            // an oversized legacy cache on every launch or erase the login.
+            runCatching { File(directory, "legacy-state-quarantined.enc").writeText(old); preferences.edit().remove("local-state").commit() }
+            recoveredData = true; return null
+        }
+        return runCatching { decrypt(old) }.onFailure { recoveredData = true }.getOrNull()
+    }
+    fun readJournal(): String? = readDocument("submission-journal.enc")
+    fun saveLocal(value: String, journal: String) {
+        require(value.length <= 1_000_000 && journal.length <= 400_000) { "本地记录过大" }
+        writeDocument("submission-journal.enc", journal)
+        writeDocument("conversation-cache.enc", value)
+        preferences.edit().remove("local-state").apply()
+    }
+    fun clearDisplayCache() { AtomicFile(File(directory, "conversation-cache.enc")).delete() }
+    private fun readDocument(name: String): String? {
+        val file = AtomicFile(File(directory, name))
+        return runCatching {
+            file.openRead().use { input ->
+                val output = java.io.ByteArrayOutputStream(); val buffer = ByteArray(8192)
+                while (output.size() <= 2_000_000) {
+                    val count = input.read(buffer); if (count < 0) break
+                    output.write(buffer, 0, count)
+                }
+                val bytes = output.toByteArray()
+                check(bytes.size <= 2_000_000)
+                decrypt(bytes.decodeToString())
+            }
+        }.onFailure { if (File(directory, name).exists()) recoveredData = true }.getOrNull()
+    }
+    private fun writeDocument(name: String, value: String) {
+        val file = AtomicFile(File(directory, name)); val stream = file.startWrite()
+        try { stream.write(encrypt(value).encodeToByteArray()); file.finishWrite(stream) }
+        catch (failure: Exception) { file.failWrite(stream); throw failure }
     }
     private fun encrypt(value: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
@@ -40,7 +90,7 @@ class DeviceCredentialStore(context: Context) {
     }
 
     fun token(): String? {
-        val packed = preferences.getString(KEY_TOKEN, null) ?: return null
+        val packed = string(KEY_TOKEN) ?: return null
         return runCatching {
             val bytes = Base64.decode(packed, Base64.NO_WRAP)
             val ivSize = bytes.first().toInt()
@@ -59,7 +109,10 @@ class DeviceCredentialStore(context: Context) {
         preferences.edit().putString(KEY_TOKEN, Base64.encodeToString(packed, Base64.NO_WRAP)).apply()
     }
 
-    fun clearToken() { preferences.edit().remove(KEY_TOKEN).remove("device-id").remove("local-state").commit() }
+    fun clearToken() {
+        preferences.edit().remove(KEY_TOKEN).remove("device-id").remove("local-state").remove("account-token").commit()
+        listOf("conversation-cache.enc", "submission-journal.enc").forEach { AtomicFile(File(directory, it)).delete() }
+    }
 
     private fun key(): SecretKey {
         val store = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }

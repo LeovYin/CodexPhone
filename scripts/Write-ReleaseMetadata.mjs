@@ -87,7 +87,7 @@ await writeFile(path.join(root, "release.json"), JSON.stringify({
   packages: packages.sort((a, b) => a.name.localeCompare(b.name))
 }, null, 2));
 const privatePatterns = [/100\.92\.169\.49/, /D:[\\/]TOOL[\\/]Github/i, /[A-Z]:[\\/]Users[\\/][^\\/"\s]+/i];
-const privateNames = new Set(["auth.json", "devices.json", "projects.json", "launcher-paths.txt", "backend-runtime.json", "shared-runtime.json", ".env", ".npmrc"]);
+const privateNames = new Set(["account-host.json", "account-host.tmp", "admin-token", "installation-id", "accounts.sqlite", "accounts.sqlite-wal", "accounts.sqlite-shm", "conversation-cache.enc", "submission-journal.enc", "auth.json", "devices.json", "projects.json", "launcher-paths.txt", "backend-runtime.json", "shared-runtime.json", ".env", ".npmrc"]);
 const textTypes = new Set([".js", ".mjs", ".cjs", ".json", ".md", ".txt", ".ps1", ".cmd", ".cs", ".html", ".css", ".yaml", ".yml", ".map"]);
 const files = {};
 async function walk(directory) {

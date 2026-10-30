@@ -25,6 +25,11 @@ class CodexPhoneApi(
     private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun health(): HostStatus = get("api/health")
+    suspend fun login(username: String, password: String, installationId: String, name: String): AccountLogin = post("v1/login", buildJsonObject {
+        put("username", username); put("password", password); put("installationId", installationId); put("name", name); put("kind", "phone")
+    }, false)
+    suspend fun logoutAccount(): JsonObject = post("v1/logout", buildJsonObject {})
+    suspend fun connectAccount(accountToken: String): PairResponse = post("api/account/connect", buildJsonObject { put("token", accountToken) }, false)
     suspend fun capabilities(): Capabilities = get("api/capabilities")
     suspend fun pair(code: String, name: String): PairResponse = post("api/pair", buildJsonObject {
         put("code", code.trim()); put("name", name)
@@ -34,7 +39,7 @@ class CodexPhoneApi(
     suspend fun approvals(): List<ApprovalRequest> = get<ApprovalsResponse>("api/approvals").approvals
     suspend fun threads(projectId: String? = null, cursor: String? = null, search: String? = null): ThreadsResponse =
         get("api/threads", mapOf("limit" to "30", "projectId" to projectId, "cursor" to cursor, "search" to search))
-    suspend fun thread(id: String, cursor: String? = null): ThreadDetail = get("api/threads/" + encode(id), mapOf("cursor" to cursor))
+    suspend fun thread(id: String, cursor: String? = null): ThreadDetail = LocalDataPolicy.detail(get("api/threads/" + encode(id), mapOf("cursor" to cursor)))
     suspend fun queue(id: String): List<QueuedMessage> = get<QueueResponse>("api/threads/" + encode(id) + "/queue").messages
     suspend fun cancelQueued(threadId: String, id: String): JsonObject = execute("DELETE", "api/threads/" + encode(threadId) + "/queue/" + encode(id))
     suspend fun submit(pending: PendingSubmission): JsonObject {

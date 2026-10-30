@@ -5,8 +5,15 @@ import kotlinx.serialization.json.Json
 
 class ConversationStore(private val credentials: DeviceCredentialStore) {
     private val json = Json { ignoreUnknownKeys = true }
-    var data: LocalData = runCatching { credentials.readLocal()?.let { json.decodeFromString<LocalData>(it) } }.getOrNull() ?: LocalData()
+    var data: LocalData = load()
         private set
+    private fun load(): LocalData {
+        val cache = runCatching { credentials.readLocal()?.let { json.decodeFromString<LocalData>(it) } }.getOrNull()
+        val journal = runCatching { credentials.readJournal()?.let { json.decodeFromString<LocalData>(it) } }.getOrNull()
+        return LocalDataPolicy.bounded((cache ?: LocalData()).let {
+            if (journal == null) it else it.copy(drafts = journal.drafts, pending = journal.pending)
+        }, includeCache = !credentials.skipDisplayCache)
+    }
     @Synchronized fun draft(key: String): String = data.drafts[key].orEmpty()
     @Synchronized fun draft(key: String, text: String) {
         val drafts = data.drafts.toMutableMap()
@@ -20,6 +27,10 @@ class ConversationStore(private val credentials: DeviceCredentialStore) {
                 data.details.filter { it.thread.id != detail.thread.id }).take(3)
         data = data.copy(threads = threads.take(60), details = details)
     }
-    @Synchronized fun persist() = credentials.saveLocal(json.encodeToString(data))
+    @Synchronized fun persist() {
+        data = LocalDataPolicy.bounded(data)
+        credentials.saveLocal(json.encodeToString(data), json.encodeToString(data.copy(threads = emptyList(), details = emptyList())))
+    }
+    @Synchronized fun clearDisplayCache() { data = data.copy(threads = emptyList(), details = emptyList()); credentials.clearDisplayCache() }
     @Synchronized fun clear() { data = LocalData(); credentials.clearToken() }
 }

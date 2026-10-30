@@ -1,4 +1,4 @@
-param([int]$AppServerPort = 0, [int]$PhonePort = 4318, [string]$RuntimeDirectory, [switch]$CheckOnly, [switch]$WaitForDesktopExit, [switch]$RenewPairing)
+param([int]$AppServerPort = 0, [int]$PhonePort = 4318, [string]$RuntimeDirectory, [switch]$CheckOnly, [switch]$WaitForDesktopExit, [Alias('RefreshBridge')][switch]$RenewPairing)
 $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 . (Join-Path $PSScriptRoot 'Common.ps1')

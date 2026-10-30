@@ -22,14 +22,16 @@ data class PhoneUiState(
     val approvals: List<ApprovalRequest> = emptyList(), val pending: PendingSubmission? = null,
     val pendingStatus: String? = null, val supportsSafeSend: Boolean = false, val realtime: Boolean = false,
     val hostVersion: String? = null,
+    val accountsUrl: String = "", val username: String = "",
     val supportsQueue: Boolean = false, val queued: List<QueuedMessage> = emptyList(),
 )
 
 class PhoneViewModel(application: Application) : AndroidViewModel(application) {
     private val credentials = DeviceCredentialStore(application)
     private val local = ConversationStore(credentials)
-    private val _state = MutableStateFlow(PhoneUiState(hostUrl = credentials.hostUrl.orEmpty(),
-        paired = credentials.token() != null, threads = local.data.threads, pending = local.data.pending))
+    private val _state = MutableStateFlow(PhoneUiState(hostUrl = credentials.hostUrl.orEmpty(), accountsUrl = credentials.accountsUrl.orEmpty(), username = credentials.username.orEmpty(),
+        paired = credentials.token() != null, threads = local.data.threads, pending = local.data.pending,
+        notice = if (credentials.recoveredData) "已跳过异常对话缓存，登录和草稿已保留。未确认的指令请先检查电脑。" else null))
     val state = _state.asStateFlow()
     private var api: CodexPhoneApi? = null
     private var epoch = 0
@@ -42,6 +44,23 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
     private val extendedHistory = mutableSetOf<String>()
     private val syncMutex = Mutex()
     fun editHost(value: String) { if (!_state.value.paired) _state.update { it.copy(hostUrl = value, error = null) } }
+    fun editAccounts(value: String) { if (!_state.value.paired) _state.update { it.copy(accountsUrl = value, error = null) } }
+    fun login(username: String, password: String) {
+        if (_state.value.busy) return
+        work {
+            val accounts = CodexPhoneApi(_state.value.accountsUrl)
+            val login = accounts.login(username.trim(), password, credentials.installationId, (android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL).take(60))
+            val host = login.host ?: error("账号尚未绑定电脑，请先在电脑管理中心完成绑定")
+            val computer = CodexPhoneApi(host.url); val session = computer.connectAccount(login.token)
+            withContext(Dispatchers.IO) {
+                credentials.saveSession(computer.baseUrl.toString(), session.token, session.deviceId)
+                credentials.saveAccount(accounts.baseUrl.toString(), login.account.username, login.token)
+            }
+            api = CodexPhoneApi(computer.baseUrl.toString(), session.token)
+            _state.update { it.copy(paired = true, hostUrl = computer.baseUrl.toString(), username = login.account.username) }
+            try { refreshNow() } finally { startRealtime() }
+        }
+    }
     private fun connection(): CodexPhoneApi = api ?: CodexPhoneApi(
         credentials.hostUrl ?: error("请先配对电脑"), credentials.token() ?: error("请重新配对电脑")
     ).also { api = it }
@@ -123,8 +142,9 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         if (session != epoch) return@withLock
         _state.update { it.copy(hostStatus = health) }
         val capabilities = try { api.capabilities() } catch (e: ApiException) { if (e.code == 404) null else throw e }
-        val projects = api.projects(); val catalog = api.models()
-        val page = api.threads(before.selectedProjectId, search = before.query)
+        val projects = api.projects().filter { it.id.isNotBlank() }.distinctBy { it.id }; val catalog = api.models()
+        val received = api.threads(before.selectedProjectId, search = before.query)
+        val page = received.copy(threads = LocalDataPolicy.threads(received.threads))
         val approvals = if (capabilities?.capabilities?.contains("global-approvals") == true) api.approvals() else emptyList()
         val detail = before.selectedThreadId?.let { api.thread(it) }
         val supportsQueue = capabilities?.capabilities?.contains("message-queue") == true
@@ -167,7 +187,7 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
             val page = connection().threads(snapshot.selectedProjectId, cursor, snapshot.query)
             if (_state.value.selectedProjectId == snapshot.selectedProjectId && _state.value.query == snapshot.query) {
                 extendedThreads = true
-                _state.update { it.copy(threads = (it.threads + page.threads).distinctBy(ThreadSummary::id), nextCursor = page.nextCursor) }
+                _state.update { it.copy(threads = LocalDataPolicy.threads(it.threads + page.threads), nextCursor = page.nextCursor) }
             }
         }
     }
@@ -312,16 +332,27 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun disconnect() {
         if (_state.value.sending) return
-        work { credentials.deviceId?.let { connection().revoke(it) }; clearConnection() }
+        work {
+            credentials.deviceId?.let { connection().revoke(it) }
+            val url = credentials.accountsUrl; val token = credentials.accountToken()
+            if (url != null && token != null) CodexPhoneApi(url, token).logoutAccount()
+            clearConnection()
+        }
     }
     fun forgetLocally() { if (!_state.value.sending) clearConnection() }
     private fun clearConnection() {
         epoch++; eventJob?.cancel(); pollJob?.cancel(); syncJob?.cancel(); draftJob?.cancel()
         extendedThreads = false; extendedHistory.clear()
         viewModelScope.coroutineContext.cancelChildren()
-        local.clear(); api = null; _state.value = PhoneUiState(hostUrl = credentials.hostUrl.orEmpty())
+        local.clear(); api = null; _state.value = PhoneUiState(hostUrl = credentials.hostUrl.orEmpty(), accountsUrl = credentials.accountsUrl.orEmpty(), username = credentials.username.orEmpty())
     }
     fun imageApi(): CodexPhoneApi? = runCatching { connection() }.getOrNull()
+    fun resetDisplayCache() = work {
+        withContext(Dispatchers.IO) { local.clearDisplayCache() }
+        _state.update { it.copy(threads = emptyList(), selectedThread = null, selectedThreadId = null,
+            notice = "对话缓存已重置，登录、草稿和未确认指令已保留。") }
+        refreshNow()
+    }
     private fun saveLocal() { viewModelScope.launch(Dispatchers.IO) { runCatching { local.persist() } } }
     private fun work(showBusy: Boolean = true, block: suspend () -> Unit) {
         val session = epoch
@@ -333,7 +364,7 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     private fun failure(e: Exception) { _state.update { it.copy(error = if (e is ApiException) e.message else
-        "无法连接电脑。请检查 Tailscale、电脑共享连接和地址。",
+        e.message?.takeIf { e is java.io.IOException } ?: "操作未完成，请检查 Tailscale、账号服务和电脑连接。",
         hostStatus = if (e is ApiException) it.hostStatus else it.hostStatus?.copy(status = "degraded")) } }
 }
 

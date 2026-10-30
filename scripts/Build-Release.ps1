@@ -30,7 +30,7 @@ New-Item -ItemType Directory -Path $web -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $taskRoot 'apps\web\dist') -Destination $web -Recurse
 $scripts = Join-Path $portable 'scripts'
 New-Item -ItemType Directory -Path $scripts -Force | Out-Null
-foreach ($name in @('Common.ps1','Build-SharedLauncher.ps1','Start-SharedCodex.ps1','Start-Standalone.ps1','Show-Connection.ps1','Check-Install.ps1','Create-Shortcut.ps1','shared-cli-proxy.mjs','SharedCliLauncher.cs')) {
+foreach ($name in @('Common.ps1','Build-SharedLauncher.ps1','Start-SharedCodex.ps1','Start-AccountService.ps1','Start-Standalone.ps1','Show-Connection.ps1','Check-Install.ps1','Create-Shortcut.ps1','shared-cli-proxy.mjs','SharedCliLauncher.cs')) {
   Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $scripts
 }
 foreach ($name in @('Start-CodexPhone.cmd','Pair-Phone.cmd','Check-CodexPhone.cmd','Restore-Standalone.cmd','LICENSE')) {
@@ -77,7 +77,8 @@ using System.Reflection;
 [assembly: AssemblyFileVersion("$versionNumbers.0")]
 "@ | Set-Content -LiteralPath $versionInfo -Encoding UTF8
 $executable = Join-Path $buildRoot 'CodexPhone.exe'
-& $compiler /nologo /codepage:65001 /target:winexe /optimize+ /platform:x64 ("/win32icon:" + (Join-Path $runtime 'codexphone.ico')) /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll ("/resource:" + $payload + ",codexphone.payload") ("/resource:" + $metadata + ",codexphone.release") ("/out:" + $executable) (Join-Path $PSScriptRoot 'Bootstrap.cs') $versionInfo
+$frameworkWpf = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\WPF'
+& $compiler /nologo /codepage:65001 /target:winexe /optimize+ /platform:x64 ("/win32icon:" + (Join-Path $runtime 'codexphone.ico')) /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll ("/r:" + (Join-Path $frameworkWpf 'PresentationFramework.dll')) ("/r:" + (Join-Path $frameworkWpf 'PresentationCore.dll')) ("/r:" + (Join-Path $frameworkWpf 'WindowsBase.dll')) /r:System.Xaml.dll ("/resource:" + $payload + ",codexphone.payload") ("/resource:" + $metadata + ",codexphone.release") ("/out:" + $executable) (Join-Path $PSScriptRoot 'Bootstrap.cs') (Join-Path $PSScriptRoot 'DesktopManager.cs') $versionInfo
 if ($LASTEXITCODE -ne 0) { throw 'EXE compilation failed' }
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 Copy-Item -LiteralPath $executable -Destination (Join-Path $output "CodexPhone-$Version-win-x64.exe")

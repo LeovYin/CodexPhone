@@ -26,6 +26,12 @@ async function request<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  authInfo: () => request<{ mode: string }>("/api/auth/info"),
+  login: (username: string, password: string, name: string) => {
+    let installationId = localStorage.getItem("codexphone-installation");
+    if (!installationId) { installationId = requestId(); localStorage.setItem("codexphone-installation", installationId); }
+    return request<{ token: string; deviceId: string }>("/api/account/login", { method: "POST", body: JSON.stringify({ username, password, name, installationId }) });
+  },
   hasPendingEnqueue: (threadId: string) => !!localStorage.getItem("codexphone-queue-request:/api/threads/" + encodeURIComponent(threadId) + "/queue"),
   hasPendingQueueRequest: (threadId: string) => queueRequestKeys(threadId).length > 0,
   discardQueueRequests: (threadId: string) => queueRequestKeys(threadId).forEach(key => localStorage.removeItem(key)),
@@ -34,6 +40,7 @@ export const api = {
   guideQueued: (threadId: string, id: string) => durableQueueRequest(`/api/threads/${encodeURIComponent(threadId)}/queue/${encodeURIComponent(id)}/guide`, {}),
   cancelQueued: (threadId: string, id: string) => request(`/api/threads/${encodeURIComponent(threadId)}/queue/${encodeURIComponent(id)}`, { method: "DELETE" }),
   health: () => request<HostStatus & { pairedDevices: number }>("/api/health"),
+  approvals: async () => (await request<{ approvals: import("@codexphone/shared").ApprovalRequest[] }>("/api/approvals")).approvals,
   pair: (code: string, name: string) => request<{ token: string; deviceId: string }>("/api/pair", { method: "POST", body: JSON.stringify({ code, name }) }),
   projects: async () => (await request<{ projects: Project[] }>("/api/projects")).projects,
   saveProject: (project: { name: string; path: string }, id?: string) => request<{ project: Project }>(id ? `/api/projects/${encodeURIComponent(id)}` : "/api/projects", { method: id ? "PUT" : "POST", body: JSON.stringify(project) }),

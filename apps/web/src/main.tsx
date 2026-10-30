@@ -44,6 +44,8 @@ function App() {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pairCode, setPairCode] = useState("");
+  const [authMode, setAuthMode] = useState("account");
+  const [username, setUsername] = useState("");
   const [pairName, setPairName] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>(() => readSaved("codexphone-drafts", {}));
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
@@ -80,6 +82,8 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState<"all" | "pinned">("all");
   const [approvalAnswers, setApprovalAnswers] = useState<Record<string, string>>({});
+  const [globalApprovals, setGlobalApprovals] = useState<ApprovalRequest[]>([]);
+  const [deferredQuestion, setDeferredQuestion] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!token) return;
@@ -90,6 +94,7 @@ function App() {
       const status = await api.health();
       if (request !== refreshRequest.current) return;
       setHostStatus(status);
+      void api.approvals().then(setGlobalApprovals).catch(() => {});
       if (status.status !== "ready") return;
       const [projectList, threadPage] = await Promise.all([api.projects(), api.threads(projectId || undefined)]);
       if (request !== refreshRequest.current) return;
@@ -99,7 +104,7 @@ function App() {
     } catch (caught) {
       if (request !== refreshRequest.current) return;
       setHostStatus((current) => current ? { ...current, status: "degraded" } : current);
-      if (errorMessage(caught).includes("not paired")) {
+      if (errorMessage(caught).includes("not paired") || errorMessage(caught).includes("登录已失效")) {
         clearToken();
         updateToken(null);
       } else setError(errorMessage(caught));
@@ -132,6 +137,7 @@ function App() {
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { if (!token) void api.authInfo().then(result => setAuthMode(result.mode)).catch(() => setAuthMode("legacy")); }, [token]);
   useEffect(() => {
     if (!token) return;
     let cancelled = false;
@@ -239,7 +245,7 @@ function App() {
     event.preventDefault();
     setError(null);
     try {
-      const result = await api.pair(pairCode.trim(), pairName.trim() || "Phone");
+      const result = authMode === "account" ? await api.login(username.trim(), pairCode, pairName.trim() || "Web 客户端") : await api.pair(pairCode.trim(), pairName.trim() || "Phone");
       setToken(result.token);
       updateToken(result.token);
       setPairCode("");
@@ -282,14 +288,14 @@ function App() {
   };
 
   const answerApproval = async (approval: ApprovalRequest, decision: "accept" | "decline") => {
-    if (!selectedId) return;
     try {
       const answer = approval.kind === "question"
         ? { answers: Object.fromEntries(approval.questions.map((question) => [question.id, approvalAnswers[`${approval.id}:${question.id}`] || ""])) }
         : { decision };
       await api.approve(approval.id, answer);
       setApprovalAnswers((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(`${approval.id}:`))));
-      await loadThread(selectedId, true);
+      if (selectedId) await loadThread(selectedId, true);
+      await refresh();
     } catch (caught) { setError(errorMessage(caught)); }
   };
 
@@ -309,18 +315,20 @@ function App() {
       <div className="brand-mark"><Code2 size={22} /></div>
       
       <h1>CodexPhone</h1>
-      <p className="pair-copy">输入电脑端 CodexPhone 服务显示的一次性配对码，连接你的工作区。</p>
+      <p className="pair-copy">{authMode === "account" ? "登录电脑管理中心绑定的账号，继续你的工作区。" : "旧版连接：输入电脑端显示的一次性配对码。"}</p>
       <form onSubmit={pair} className="pair-form">
         <label>设备名称<input value={pairName} onChange={(event) => setPairName(event.target.value)} placeholder="我的手机" autoComplete="off" /></label>
-        <label>配对码<input value={pairCode} onChange={(event) => setPairCode(event.target.value)} placeholder="粘贴电脑端配对码" autoComplete="one-time-code" required /></label>
+        {authMode === "account" && <label>账号<input value={username} onChange={event => setUsername(event.target.value)} autoComplete="username" required /></label>}
+        <label>{authMode === "account" ? "密码" : "配对码"}<input type={authMode === "account" ? "password" : "text"} value={pairCode} onChange={(event) => setPairCode(event.target.value)} autoComplete={authMode === "account" ? "current-password" : "one-time-code"} required /></label>
         {error && <p className="error-note"><CircleAlert size={16} />{error}</p>}
-        <button className="primary-button" type="submit"><Smartphone size={17} />配对设备</button>
+        <button className="primary-button" type="submit"><Smartphone size={17} />{authMode === "account" ? "登录并连接" : "配对设备"}</button>
       </form>
       <div className="secure-note"><Wifi size={15} />仅通过你的 Tailscale 网络连接</div>
     </section>
   </main>;
 
   const activeThread = threads.find((thread) => thread.id === selectedId) ?? detail?.thread ?? null;
+  const waitingQuestion = [...globalApprovals, ...detail?.approvals || []].find(approval => approval.kind === "question" && approval.id !== deferredQuestion);
   const selectedProject = projects.find((project) => project.id === projectId);
   const projectsSaved = async (project?: Project) => {
     const entries = await api.projects();
@@ -391,7 +399,7 @@ function App() {
           {detail.approvals.map((approval) => <article className="approval-card" key={approval.id}>
             <div className="approval-heading"><span className="approval-icon"><CircleAlert size={15} /></span><div><strong>{approval.title}</strong><span>Codex 正在等待你的决定</span></div></div>
             {approval.detail && <pre className="approval-detail">{approval.detail}</pre>}
-            {approval.questions.map((question) => <label className="approval-question" key={question.id}>{question.question}<input type={question.secret ? "password" : "text"} value={approvalAnswers[`${approval.id}:${question.id}`] || ""} onChange={(event) => setApprovalAnswers((current) => ({ ...current, [`${approval.id}:${question.id}`]: event.target.value }))} /></label>)}
+            {approval.questions.map((question) => <label className="approval-question" key={question.id}>{question.question}{question.options.map(option => <button type="button" key={option.label} onClick={() => setApprovalAnswers(current => ({ ...current, [`${approval.id}:${question.id}`]: option.label }))}>{option.label} {option.description}</button>)}<input type={question.secret ? "password" : "text"} value={approvalAnswers[`${approval.id}:${question.id}`] || ""} onChange={(event) => setApprovalAnswers((current) => ({ ...current, [`${approval.id}:${question.id}`]: event.target.value }))} /></label>)}
             <div className="approval-actions">{approval.kind !== "question" && <button className="approval-decline" onClick={() => void answerApproval(approval, "decline")}><X size={15} />拒绝</button>}{approval.canAccept && <button className="approval-accept" onClick={() => void answerApproval(approval, "accept")}><Plus size={15} />{approval.kind === "question" ? "提交回答" : "允许"}</button>}</div>
           </article>)}
           {detail.turns.flatMap((turn) => turn.items.filter((item) => item.type === "userMessage" || item.type === "agentMessage").map((item, index) => {
@@ -427,6 +435,7 @@ function App() {
       {!isOnline && token && <div className="offline-banner"><WifiOff size={15} />电脑端不可用，请确认 CodexPhone 正在运行</div>}
       {hostStatus?.lastError && <span className="sr-only">{hostStatus.lastError}</span>}
     </section>
+    {waitingQuestion && <div className="question-backdrop"><section role="dialog" aria-modal="true" aria-label="Agent 正在等待回答" className="question-dialog"><h2>Agent 正在等待回答</h2><p>选择选项或填写你的回答，提交后任务会继续。</p>{waitingQuestion.questions.map(question => <fieldset key={question.id}><legend>{question.question}</legend>{question.options.map(option => <button type="button" aria-pressed={approvalAnswers[`${waitingQuestion.id}:${question.id}`] === option.label} key={option.label} onClick={() => setApprovalAnswers(current => ({ ...current, [`${waitingQuestion.id}:${question.id}`]: option.label }))}><strong>{option.label}</strong><span>{option.description}</span></button>)}<label>你的回答<input type={question.secret ? "password" : "text"} value={approvalAnswers[`${waitingQuestion.id}:${question.id}`] || ""} onChange={event => setApprovalAnswers(current => ({ ...current, [`${waitingQuestion.id}:${question.id}`]: event.target.value }))} /></label></fieldset>)}{error && <p>{error}</p>}<button className="primary-button" disabled={waitingQuestion.questions.some(q => !approvalAnswers[`${waitingQuestion.id}:${q.id}`]?.trim())} onClick={() => void answerApproval(waitingQuestion, "accept")}>提交回答</button><button type="button" onClick={() => { setDeferredQuestion(waitingQuestion.id); void loadThread(waitingQuestion.threadId); }}>稍后回答，打开所属对话</button></section></div>}
   </main>;
 }
 

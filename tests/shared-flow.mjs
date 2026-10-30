@@ -51,6 +51,26 @@ try {
   phoneApprovals.answer(request.id, { decision: "decline" });
   await waitFor(() => desktopEvents.some((entry) => entry.method === "turn/completed" && entry.params.turn?.id === approvalTurn.turn.id), "declined approval turn completes");
   await waitFor(() => desktopApprovals.list(threadId).length === 0, "desktop clears resolved approval");
+  provider.state.nextFunction = { name: "request_user_input", arguments: { questions: [
+    { id: "platform", header: "Platform", question: "Which client?", options: [{ label: "Native", description: "Kotlin" }, { label: "Web", description: "Browser" }] },
+    { id: "notes", header: "Notes", question: "Any extra requirements?", options: [{ label: "Keep running", description: "Continue" }, { label: "Pause", description: "Wait" }] }
+  ] } };
+  const questionTurn = await desktop.request("turn/start", { threadId, collaborationMode: { mode: "plan", settings: { model: "codexphone-fixture", reasoning_effort: "low" } }, input: [{ type: "text", text: "question fixture" }] });
+  await waitFor(() => phoneApprovals.list(threadId).some(q => q.kind === "question"), "phone receives Agent question");
+  // A phone bridge attaching while the Agent is blocked must recover the question too.
+  const latePhone = await AppServerClient.connect(`ws://127.0.0.1:${port}`);
+  try {
+    await latePhone.request("thread/resume", { threadId });
+    await waitFor(() => latePhone.outstandingRequests().some(r => r.method === "item/tool/requestUserInput"), "outstanding question replayed to new client");
+    const lateQueue = new ApprovalQueue(latePhone);
+    for (const pending of latePhone.outstandingRequests()) lateQueue.add(pending);
+    const question = lateQueue.list(threadId).find(q => q.kind === "question");
+    assert.deepEqual(question.questions.map(q => q.id), ["platform", "notes"]);
+    lateQueue.answer(question.id, { answers: { platform: "Native", notes: "Keep my task running" } });
+  } finally { latePhone.close(); }
+  await waitFor(() => desktopEvents.some(e => e.method === "turn/completed" && e.params.turn?.id === questionTurn.turn.id), "Agent continues after phone answer");
+  assert.ok(provider.state.requests.some(r => JSON.stringify(r.input).includes("Keep my task running")), "Agent receives the submitted answer");
+  await waitFor(() => phoneApprovals.list(threadId).length === 0 && desktopApprovals.list(threadId).length === 0, "all clients clear answered question");
   const dynamic = (await desktop.request("thread/start", { cwd: directory, dynamicTools: [{ type: "function", name: "gui_fixture", description: "Local GUI-owned tool fixture", inputSchema: { type: "object", properties: {} } }] })).thread;
   await desktop.request("turn/start", { threadId: dynamic.id, input: [{ type: "text", text: "create persistent dynamic fixture" }] });
   await waitFor(() => desktopEvents.some((entry) => entry.method === "turn/completed" && entry.params.threadId === dynamic.id), "dynamic fixture history");
@@ -71,7 +91,7 @@ try {
   await waitFor(() => provider.state.streams.size > 0, "held stream");
   await phone.request("turn/interrupt", { threadId, turnId: held.turn.id });
   await waitFor(() => desktopEvents.some((entry) => entry.method === "turn/completed" && entry.params.turn?.id === held.turn.id && entry.params.turn.status === "interrupted"), "phone interrupts desktop turn");
-  console.log(JSON.stringify({ phoneToDesktop: "passed", desktopToPhone: "passed", sharedHistory: "passed", crossClientInterrupt: "passed", crossClientApproval: "passed", guiOwnedDynamicTool: "passed", approvalCommandExecuted: false, localFixtureCalls: provider.state.requests.length, externalApiCalls: 0 }));
+  console.log(JSON.stringify({ phoneToDesktop: "passed", desktopToPhone: "passed", sharedHistory: "passed", crossClientInterrupt: "passed", crossClientApproval: "passed", questionAnswerAndContinue: "passed", pendingQuestionReplay: "passed", guiOwnedDynamicTool: "passed", approvalCommandExecuted: false, localFixtureCalls: provider.state.requests.length, externalApiCalls: 0 }));
 } finally {
   desktop?.close(); phone?.close(); stopOwnedProcessTree(child); await provider.close();
   await new Promise((resolve) => child.exitCode !== null ? resolve() : child.once("exit", resolve));

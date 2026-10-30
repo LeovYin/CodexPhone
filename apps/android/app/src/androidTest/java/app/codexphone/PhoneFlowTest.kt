@@ -44,10 +44,16 @@ class PhoneFlowTest {
     @Volatile private var showRunning = false
     @Volatile private var operationQueries = 0
     @Volatile private var longHistory = false
+    @Volatile private var questionMode = false
+    private val answers = CopyOnWriteArrayList<JsonObject>()
+    private val questionRequest = """{"id":"approval","threadId":"shared","turnId":"turn","kind":"question","title":"Codex 需要你的回答","detail":"","canAccept":true,"questions":[{"id":"platform","question":"选择客户端","secret":false,"options":[{"label":"原生安卓","description":"Kotlin"},{"label":"网页","description":"浏览器"}]},{"id":"notes","question":"补充要求","secret":false,"options":[]}]}"""
     private val request = """{"id":"approval","threadId":"shared","turnId":"turn","kind":"command","title":"允许执行测试命令？","detail":"echo fixture","canAccept":true,"questions":[]}"""
     @Before fun setup() {
         val app = ApplicationProvider.getApplicationContext<Application>()
         app.getSharedPreferences("device-connection", 0).edit().clear().commit()
+        listOf("conversation-cache.enc", "submission-journal.enc", "last-crash.txt", "previous-crash.txt").forEach { name ->
+            android.util.AtomicFile(File(app.filesDir, name)).delete()
+        }
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(r: RecordedRequest): MockResponse {
                 val path = r.path.orEmpty().substringBefore('?')
@@ -57,9 +63,11 @@ class PhoneFlowTest {
                     }
                     override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, reason) }
                 })
-                if (path != "/api/health" && path != "/api/pair" && r.getHeader("Authorization") != "Bearer fixture-token") return MockResponse().setResponseCode(401).setBody("""{"error":"not paired"}""")
+                if (path != "/api/health" && path != "/api/pair" && path != "/v1/login" && path != "/api/account/connect" && r.getHeader("Authorization") != "Bearer fixture-token") return MockResponse().setResponseCode(401).setBody("""{"error":"not paired"}""")
                 val body = when {
                     path == "/api/health" -> """{"status":"ready","model":"fixture-model","provider":"local-fixture","codexVersion":"fixture","transport":"websocket"}"""
+                    path == "/v1/login" -> """{"token":"account-token","expiresAt":9999999999999,"account":{"id":"fixture-account","username":"fixture-user"},"host":{"id":"host","name":"电脑","url":"${server.url("/").newBuilder().host("127.0.0.1").build()}"}}"""
+                    path == "/api/account/connect" -> """{"token":"fixture-token","deviceId":"device"}"""
                     path == "/api/pair" -> """{"token":"fixture-token","deviceId":"device"}"""
                     path == "/api/capabilities" -> """{"hostVersion":"0.2.1","protocolVersion":1,"capabilities":["idempotent-send","global-approvals","message-queue"]}"""
                     path == "/api/projects" -> """{"projects":[{"id":"project","name":"测试项目","canStart":true}]}"""
@@ -73,8 +81,12 @@ class PhoneFlowTest {
                         """{"threadId":"shared","queueId":"queued"}"""
                     }
                     path.endsWith("/queue") -> buildJsonObject { put("messages", JsonArray(queued.toList())) }.toString()
-                    path == "/api/approvals" -> """{"approvals":[""" + (if (approvalPending) request else "") + "]}"
-                    path == "/api/approvals/approval" -> { approvalPending = false; """{"threadId":"shared"}""" }
+                    path == "/api/approvals" -> """{"approvals":[""" + (if (approvalPending) (if (questionMode) questionRequest else request) else "") + "]}"
+                    path == "/api/approvals/approval" -> {
+                        if (questionMode) answers.add(Json.parseToJsonElement(r.body.readUtf8()).jsonObject)
+                        approvalPending = false; showRunning = false
+                        """{"threadId":"shared"}"""
+                    }
                     path.endsWith("/interrupt") -> { interrupted = true; showRunning = false; "{}" }
                     r.method == "POST" && (path == "/api/threads" || path.endsWith("/turns") || path.endsWith("/steer")) -> {
                         val payload = Json.parseToJsonElement(r.body.readUtf8()).jsonObject; submissions.add(payload)
@@ -90,6 +102,7 @@ class PhoneFlowTest {
             }
         }
         server.start()
+        DeviceCredentialStore(app).saveSession(server.url("/").newBuilder().host("127.0.0.1").build().toString(), "fixture-token", "device")
         vm = PhoneViewModel(app)
         compose.setContent { MaterialTheme { CodexPhoneApp(vm) } }
         vm.setForeground(true)
@@ -115,17 +128,33 @@ class PhoneFlowTest {
             putJsonArray("turns") { add(buildJsonObject { put("id", "turn"); put("items", items) }) }
         }.toString()
     }
+    private fun connected() { compose.waitUntil(20000) { vm.state.value.threads.isNotEmpty() || vm.state.value.error != null }; Assert.assertTrue(vm.state.value.error ?: "Fixture did not connect", vm.state.value.threads.isNotEmpty()) }
     @After fun cleanup() {
         vm.setForeground(false)
         // MockWebServer owns accepted sockets; cancel() expects a client Call.
         sockets.forEach { it.close(1000, "Test complete") }
         server.shutdown()
     }
+    @Test fun agentQuestionAppearsOnTaskListAndAnswerUnblocksTask() {
+        questionMode = true; showRunning = true
+        connected()
+        compose.waitUntil(15000) { vm.state.value.approvals.any { it.kind == "question" } || vm.state.value.error != null }
+        Assert.assertTrue("Question was not received; error=${vm.state.value.error}, HTTP requests=${server.requestCount}", vm.state.value.approvals.any { it.kind == "question" })
+        compose.onNodeWithText("提交回答").assertIsNotEnabled()
+        compose.onNodeWithText("原生安卓").performClick()
+        compose.onAllNodesWithText("你的回答").onLast().performTextInput("继续执行，不要中断")
+        screenshot("agent-question-test.png")
+        compose.onNodeWithText("提交回答").performClick()
+        compose.waitUntil(15000) { answers.size == 1 && vm.state.value.approvals.isEmpty() }
+        Assert.assertEquals("原生安卓", answers[0]["answers"]!!.jsonObject["platform"]!!.jsonPrimitive.content)
+        Assert.assertEquals("继续执行，不要中断", answers[0]["answers"]!!.jsonObject["notes"]!!.jsonPrimitive.content)
+        Assert.assertTrue(submissions.isEmpty())
+        compose.onNodeWithText("共享测试任务").performClick()
+        compose.waitUntil(15000) { vm.state.value.selectedThread != null }
+        Assert.assertNull(vm.state.value.selectedThread!!.thread.activeTurnId)
+    }
     @Test fun pairReadSendSelectApproveInterruptAndRestoreDraft() {
-        compose.onNodeWithText("电脑地址").performTextInput(server.url("/").newBuilder().host("127.0.0.1").build().toString())
-        compose.onNodeWithText("一次性配对码").performTextInput("fixture-code")
-        compose.onNodeWithText("配对并连接").performClick()
-        compose.waitUntil(20000) { vm.state.value.threads.isNotEmpty() }
+        connected()
         compose.onNodeWithText("共享测试任务").performClick()
         compose.waitUntil(10000) { vm.state.value.selectedThread != null }
         compose.onNodeWithText("fixture-model").performClick()
@@ -162,10 +191,7 @@ class PhoneFlowTest {
         compose.onNodeWithText("保存草稿").assertExists()
     }
     @Test fun bundledMermaidRendersWithoutExternalRequests() {
-        compose.onNodeWithText("电脑地址").performTextInput(server.url("/").newBuilder().host("127.0.0.1").build().toString())
-        compose.onNodeWithText("一次性配对码").performTextInput("fixture-code")
-        compose.onNodeWithText("配对并连接").performClick()
-        compose.waitUntil(15000) { vm.state.value.threads.isNotEmpty() }
+        connected()
         compose.onNodeWithText("共享测试任务").performClick()
         compose.waitUntil(15000) { vm.state.value.selectedThread != null }
         val rendered = AtomicReference("false")
@@ -182,10 +208,7 @@ class PhoneFlowTest {
     }
     @Test fun longConversationOpensAtLatestAndNavigationJumpsBothWays() {
         longHistory = true
-        compose.onNodeWithText("电脑地址").performTextInput(server.url("/").newBuilder().host("127.0.0.1").build().toString())
-        compose.onNodeWithText("一次性配对码").performTextInput("fixture-code")
-        compose.onNodeWithText("配对并连接").performClick()
-        compose.waitUntil(15000) { vm.state.value.threads.isNotEmpty() }
+        connected()
         compose.onNodeWithText("共享测试任务").performClick()
         compose.waitUntil(15000) { vm.state.value.selectedThread != null }
         screenshot("long-history-test.png")
