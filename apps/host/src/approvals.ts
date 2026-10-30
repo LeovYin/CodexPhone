@@ -6,7 +6,7 @@ import { HttpError } from "./security.js";
 export class ApprovalQueue {
   private pending = new Map<string, { publicRequest: ApprovalRequest; original: ServerRequest }>();
   constructor(private client: AppServerClient) {}
-  list(threadId: string): ApprovalRequest[] { return [...this.pending.values()].filter((entry) => entry.publicRequest.threadId === threadId).map((entry) => entry.publicRequest); }
+  list(threadId?: string): ApprovalRequest[] { return [...this.pending.values()].filter((entry) => threadId === undefined || entry.publicRequest.threadId === threadId).map((entry) => entry.publicRequest); }
   remove(originalId: unknown): void { for (const [id, entry] of this.pending) if (entry.original.id === originalId) this.pending.delete(id); }
   add(original: ServerRequest): ApprovalRequest | null {
     const p = original.params;

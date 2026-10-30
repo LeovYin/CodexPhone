@@ -1,0 +1,3 @@
+<full-backup-content>
+    <exclude domain="sharedpref" path="device-connection.xml" />
+</full-backup-content>

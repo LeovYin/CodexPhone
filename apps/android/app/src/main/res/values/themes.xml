@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.CodexPhone" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#315FCA</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">#F4F7FF</item>
+        <item name="android:navigationBarColor">#F4F7FF</item>
+    </style>
+</resources>

@@ -10,6 +10,7 @@ import type { HostStatus, ModelOption, Project, ThreadDetail, ThreadSummary } fr
 import { isRecord } from "@codexphone/shared";
 import { AppServerClient, type ServerRequest } from "./app-server.js";
 import { ApprovalQueue } from "./approvals.js";
+import { OperationStore } from "./operations.js";
 import { normalizeThread, normalizeTurn, pageData, stringOrNull } from "./normalize.js";
 import { modelSelection, normalizeModel } from "./models.js";
 import { readImage } from "./media.js";
@@ -21,11 +22,13 @@ const host = Fastify({ logger: { level: process.env.LOG_LEVEL || "info" } });
 await host.register(websocket);
 const stateDir = path.resolve(process.env.CODEXPHONE_HOME || path.join(homedir(), ".codexphone"));
 const store = new DeviceStore(stateDir);
+const operations = new OperationStore(stateDir);
 const projectStore = new ProjectStore(stateDir);
 const port = Number(process.env.PORT || 4318);
 const bindHost = process.env.HOST || "0.0.0.0";
 const allowedOrigins = new Set((process.env.CODEXPHONE_ORIGINS || "").split(",").map((origin) => origin.trim()).filter(Boolean));
 const sockets = new Set<import("ws").WebSocket>();
+const socketDevices = new Map<import("ws").WebSocket, string>();
 const wsTickets = new Map<string, { deviceId: string; expiresAt: number }>();
 let appServer: AppServerClient | undefined;
 let approvals: ApprovalQueue | undefined;
@@ -123,9 +126,15 @@ function publicNotification(method: string, params: Record<string, unknown>): un
 
 host.addHook("onRequest", async (request) => { if (!originAllowed(request.headers.origin, request.headers.host, allowedOrigins)) throw new HttpError(403, "Origin is not allowed"); if (request.url.startsWith("/api/") && !request.url.startsWith("/api/health") && !request.url.startsWith("/api/pair")) requireDevice(request); });
 host.get("/api/health", async () => ({ ...hostStatus, activeTasks: activeTurns.size, pairedDevices: store.list().length }));
+host.get("/api/capabilities", async () => ({ hostVersion: "0.2.0", protocolVersion: 1, capabilities: ["idempotent-send", "operation-status", "global-approvals", "websocket-ticket", "media"], requestRetentionDays: 7 }));
+host.get<{ Params: { requestId: string } }>("/api/operations/:requestId", async (request) => {
+  const entry = operations.get(requireDevice(request).id, request.params.requestId);
+  if (!entry) throw new HttpError(404, "Request not found");
+  return { requestId: entry.requestId, state: entry.state, result: entry.result, error: entry.error };
+});
 host.post("/api/pair", async (request) => { const body = requireObject(request.body); return store.pair(body.code, body.name); });
 host.get("/api/ws-ticket", async (request) => { const device = requireDevice(request); const ticket = randomBytes(36).toString("base64url"); wsTickets.set(ticket, { deviceId: device.id, expiresAt: Date.now() + 30_000 }); return { ticket }; });
-host.get("/ws", { websocket: true }, (socket, request) => { const query = request.query as { ticket?: string }; const entry = typeof query?.ticket === "string" ? wsTickets.get(query.ticket) : undefined; if (typeof query?.ticket === "string") wsTickets.delete(query.ticket); if (!entry || entry.expiresAt < Date.now() || !store.hasDevice(entry.deviceId)) { socket.close(1008, "Invalid WebSocket ticket"); return; } sockets.add(socket); socket.on("close", () => sockets.delete(socket)); socket.on("error", () => sockets.delete(socket)); socket.send(JSON.stringify({ type: "connected", deviceId: entry.deviceId })); });
+host.get("/ws", { websocket: true }, (socket, request) => { const query = request.query as { ticket?: string }; const entry = typeof query?.ticket === "string" ? wsTickets.get(query.ticket) : undefined; if (typeof query?.ticket === "string") wsTickets.delete(query.ticket); if (!entry || entry.expiresAt < Date.now() || !store.hasDevice(entry.deviceId)) { socket.close(1008, "Invalid WebSocket ticket"); return; } sockets.add(socket); socketDevices.set(socket, entry.deviceId); socket.on("close", () => { sockets.delete(socket); socketDevices.delete(socket); }); socket.on("error", () => { sockets.delete(socket); socketDevices.delete(socket); }); socket.send(JSON.stringify({ type: "connected", deviceId: entry.deviceId })); });
 host.get("/api/projects", async () => ({ projects: await knownProjects() }));
 host.post("/api/projects", async (request) => {
   const project = await projectStore.upsert(requireObject(request.body));
@@ -165,6 +174,7 @@ host.post("/api/threads", async (request) => {
   if (!project?.path) throw new HttpError(400, "Choose a configured project");
   await validateProjectDirectory(project.path);
   const selection = modelSelection(body, await models());
+  return operations.run(requireDevice(request).id, body.clientRequestId, "/api/threads", body, async () => {
   const started = requireObject(await server().request("thread/start", { cwd: project.path, ...(project.codexProjectId ? { projectId: project.codexProjectId } : {}), ...(selection.model ? { model: selection.model } : {}), serviceName: "codexphone" }));
   const thread = isRecord(started.thread) ? started.thread : started;
   if (typeof thread.id !== "string") throw new HttpError(502, "Codex did not return a thread id");
@@ -172,13 +182,15 @@ host.post("/api/threads", async (request) => {
   return serialized(threadId, async () => {
     try {
       const turn = await server().request("turn/start", { threadId, ...selection, input: [{ type: "text", text: prompt }] }, 60_000);
-      emit({ type: "refresh-thread", threadId }); return { threadId, turn };
+      emit({ type: "refresh-thread", threadId }); return { threadId, turnId: isRecord(turn) && typeof turn.id === "string" ? turn.id : null };
     } catch (error) { await releaseThread(threadId).catch(() => {}); throw error; }
+  });
   });
 });
 host.post<{ Params: { threadId: string } }>("/api/threads/:threadId/turns", async (request) => {
   const body = requireObject(request.body); const prompt = promptText(body.prompt); const threadId = request.params.threadId;
   const selection = modelSelection(body, await models());
+  return operations.run(requireDevice(request).id, body.clientRequestId, request.url, body, async () => {
   return serialized(threadId, async () => {
     try {
       if (server().transport === "websocket") await detail(threadId);
@@ -186,16 +198,19 @@ host.post<{ Params: { threadId: string } }>("/api/threads/:threadId/turns", asyn
       await server().request("thread/resume", { threadId, excludeTurns: true });
       ownedThreads.add(threadId); externalThreads.delete(threadId);
       const turn = await server().request("turn/start", { threadId, ...selection, input: [{ type: "text", text: prompt }] }, 60_000);
-      selections.set(threadId, selection); emit({ type: "refresh-thread", threadId }); return { threadId, turn };
+      selections.set(threadId, selection); emit({ type: "refresh-thread", threadId }); return { threadId, turnId: isRecord(turn) && typeof turn.id === "string" ? turn.id : null };
     } catch (error) { return explainThreadWriteError(error, threadId); }
+  });
   });
 });
 host.post<{ Params: { threadId: string } }>("/api/threads/:threadId/steer", async (request) => {
   const body = requireObject(request.body); const threadId = request.params.threadId;
+  return operations.run(requireDevice(request).id, body.clientRequestId, request.url, body, async () => {
   return serialized(threadId, async () => {
     const expectedTurnId = activeTurns.get(threadId);
     if (!ownedThreads.has(threadId) || !expectedTurnId) throw new HttpError(409, "当前连接没有可指导的运行任务");
     return server().request("turn/steer", { threadId, expectedTurnId, input: [{ type: "text", text: promptText(body.prompt) }] });
+  });
   });
 });
 host.post<{ Params: { threadId: string } }>("/api/threads/:threadId/interrupt", async (request) => {
@@ -206,13 +221,13 @@ host.post<{ Params: { threadId: string } }>("/api/threads/:threadId/interrupt", 
   });
 });
 host.post<{ Params: { threadId: string } }>("/api/threads/:threadId/release", async (request) => serialized(request.params.threadId, async () => ({ released: await releaseThread(request.params.threadId) })));
-host.get<{ Querystring: { threadId?: string } }>("/api/approvals", async (request) => ({ approvals: approvals?.list(request.query.threadId || "") || [] }));
+host.get<{ Querystring: { threadId?: string } }>("/api/approvals", async (request) => ({ approvals: approvals?.list(request.query.threadId) || [] }));
 host.post<{ Params: { approvalId: string } }>("/api/approvals/:approvalId", async (request) => ({ threadId: approvals!.answer(request.params.approvalId, requireObject(request.body)) }));
 host.get("/api/devices", async (request) => { const device = requireDevice(request); return { devices: store.list().map((item) => ({ ...item, current: item.id === device.id })) }; });
-host.delete<{ Params: { deviceId: string } }>("/api/devices/:deviceId", async (request) => { const device = requireDevice(request); if (device.id !== request.params.deviceId) throw new HttpError(403, "A device can only revoke its own session"); await store.revoke(device.id); return { revoked: true }; });
+host.delete<{ Params: { deviceId: string } }>("/api/devices/:deviceId", async (request) => { const device = requireDevice(request); if (device.id !== request.params.deviceId) throw new HttpError(403, "A device can only revoke its own session"); await store.revoke(device.id); for (const [socket, id] of socketDevices) if (id === device.id) socket.close(1008, "Device revoked"); return { revoked: true }; });
 host.setErrorHandler((error, _request, reply) => { reply.code(error instanceof HttpError ? error.statusCode : 500).send({ error: publicError(error) }); });
 
-await mkdir(stateDir, { recursive: true }); await store.load(); await projectStore.load();
+await mkdir(stateDir, { recursive: true }); await store.load(); await projectStore.load(); await operations.load();
 async function connectServer(): Promise<void> {
   try {
     const client = await AppServerClient.start();

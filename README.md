@@ -6,7 +6,7 @@
 
 在手机上继续电脑里的 Codex 对话。通过自己的 Tailscale 网络连接，使用电脑上原有的 Codex 和 API 配置。
 
-**Windows x64 · MIT 开源 · 社区项目，非 OpenAI 官方产品**
+**Android 8.0+ · Windows x64 · MIT 开源 · 社区项目，非 OpenAI 官方产品**
 
 ![CodexPhone Windows 启动面板](docs/launcher.png)
 
@@ -37,6 +37,16 @@ EXE 内置 Node.js 和原生适配器，不需要安装 pnpm 或编译器。它�
 - 选择本机 Codex 提供的模型和思考强度。
 - 手机布局、独立对话草稿、后台恢复刷新与连接重试。
 - 原生 Windows 面板：共享连接、手机配对、环境检查、日志目录。
+
+## 原生安卓客户端
+
+<p align="center"><img src="docs/android-pair.png" width="260" alt="CodexPhone 原生安卓配对页面"></p>
+
+从 [Releases](https://github.com/LeovYin/CodexPhone/releases) 下载 `CodexPhone-0.2.0-android.apk`，安装后打开。电脑端也请升级到 **0.2.0**，再填入启动面板上的 Tailscale 地址和一次性配对码。Android 8.0（API 26）及以上可安装。
+
+Kotlin 与 Jetpack Compose 客户端提供原生任务列表、搜索、收藏、新建/继续任务、模型与推理强度、前台实时同步、审批问答、中断、Markdown 表格与图片/SVG 预览。回车换行，点击按钮发送。草稿、最近对话缓存和待确认提交加密保存在本机。弱网提交先查询电脑的请求记录，避免盲目重复执行。
+
+手机进入后台后电脑任务继续，返回应用时补齐状态；本版不提供锁屏推送。APK 使用持续保留的发布密钥签名，GitHub 标为 Preview，便于先在不同手机上验证。安装升级、开发环境与 Kotlin 学习导览见 [安卓说明](apps/android/README.md)。
 
 ## 工作原理
 

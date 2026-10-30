@@ -35,9 +35,17 @@ try {
     const json = await response.json(); assert.equal(response.status, 200, `${endpoint}: ${json.error || response.status}`); return json;
   };
   assert.equal((await request("health")).transport, "websocket");
+  assert.ok((await request("capabilities")).capabilities.includes("idempotent-send"));
+  assert.deepEqual((await request("approvals")).approvals, []);
   await request(`threads/${threadId}`);
-  await request(`threads/${threadId}/turns`, { prompt: "phone HTTP turn" });
+  const submission = { prompt: "phone HTTP turn", clientRequestId: "phone-fixture-request-0001" };
+  const accepted = await request(`threads/${threadId}/turns`, submission);
   await waitFor(() => events.filter((event) => event.method === "turn/completed").length === 2, "desktop sees phone HTTP turn");
+  assert.deepEqual(await request(`threads/${threadId}/turns`, submission), accepted);
+  const operation = await request(`operations/${submission.clientRequestId}`);
+  assert.equal(operation.state, "completed");
+  assert.deepEqual(operation.result, accepted);
+  assert.equal((await request(`threads/${threadId}`)).turns.length, 2, "Retry must not create another turn");
   await desktop.request("turn/start", { threadId, input: [{ type: "text", text: "desktop after phone completion" }] });
   await waitFor(async () => (await request(`threads/${threadId}`)).turns.length === 3, "phone remains subscribed after completion");
   desktop.close(); desktop = undefined; stopOwnedProcessTree(backend);
@@ -47,7 +55,7 @@ try {
   const detail = await request(`threads/${threadId}`); assert.equal(detail.thread.id, threadId);
   await request(`threads/${threadId}/turns`, { prompt: "phone after backend restart" });
   await waitFor(async () => (await request(`threads/${threadId}`)).turns.some((turn) => turn.items.some((item) => item.text.includes("response 4"))), "send after reconnect");
-  console.log(JSON.stringify({ authenticatedPhoneSend: "passed", desktopReceivesPhoneTurn: "passed", subscriptionSurvivesCompletion: "passed", backendRestartRecovery: "passed", pairingPreserved: (await request("health")).pairedDevices === 1, externalApiCalls: 0 }));
+  console.log(JSON.stringify({ authenticatedPhoneSend: "passed", duplicateSubmission: "passed", operationStatus: "passed", desktopReceivesPhoneTurn: "passed", subscriptionSurvivesCompletion: "passed", backendRestartRecovery: "passed", pairingPreserved: (await request("health")).pairedDevices === 1, externalApiCalls: 0 }));
 } finally {
   desktop?.close(); if (runtime) await runtime.closeHost(); stopOwnedProcessTree(backend); await provider.close();
   await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });

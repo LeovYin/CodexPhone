@@ -36,12 +36,19 @@ const repo = user.login + "/CodexPhone";
 const repoUrl = "https://github.com/" + repo;
 console.log("Publishing reviewed source and release to " + repoUrl);
 const releaseDir = path.join(root, "releases", version);
+const assets = (await readdir(releaseDir)).filter((name) => /\.(apk|exe|zip|txt|json|md)$/i.test(name));
+for (const required of ["CodexPhone-" + version + "-android.apk", "CodexPhone-" + version + "-win-x64.exe", "SHA256SUMS.txt"]) {
+  if (!assets.includes(required)) throw new Error("Required release asset missing: " + required);
+}
 const checksums = (await readFile(path.join(releaseDir, "SHA256SUMS.txt"), "utf8")).trim().split(/\r?\n/);
+const checked = new Set();
 for (const line of checksums) {
   const match = line.match(/^([a-f0-9]{64})  ([^\\/]+)$/);
   if (!match) throw new Error("Invalid checksum entry");
   if (createHash("sha256").update(await readFile(path.join(releaseDir, match[2]))).digest("hex") !== match[1]) throw new Error("Release hash mismatch: " + match[2]);
+  checked.add(match[2]);
 }
+if (assets.some((name) => name !== "SHA256SUMS.txt" && !checked.has(name))) throw new Error("An asset is missing its checksum");
 const manifest = JSON.parse(await readFile(path.join(root, "scripts/source-files.json"), "utf8"));
 const files = [...manifest.files];
 async function collect(relative) {
@@ -73,18 +80,17 @@ if (alreadyGit.status === 0) {
 git(["add", "--pathspec-from-file=-", "--pathspec-file-nul"], files.join("\0") + "\0");
 const staged = git(["diff", "--cached", "--name-only", "-z"]).split("\0").filter(Boolean);
 if (staged.some((file) => !files.includes(file))) throw new Error("Unexpected staged file; source publication stopped");
-if (staged.length) git(["commit", "-m", "Release CodexPhone " + tag + " with Windows EXE packaging"]);
+if (staged.length) git(["commit", "-m", "Release CodexPhone " + tag + " with native Android and Windows Host"]);
 if (!repoExists) await api("/user/repos", "POST", { name: "CodexPhone", description: "Self-hosted mobile access to your Codex desktop over Tailscale. Windows EXE, shared conversations, MIT.", private: false, auto_init: false, has_issues: true });
 git(["push", "-u", "origin", "main"]);
 const existingTag = spawnSync("git", ["rev-parse", "--verify", tag], { cwd: root, encoding: "utf8", windowsHide: true });
-if (existingTag.status !== 0) git(["tag", "-a", tag, "-m", "CodexPhone " + tag + " Windows preview"]);
+if (existingTag.status !== 0) git(["tag", "-a", tag, "-m", "CodexPhone " + tag + " Android and Windows preview"]);
 git(["push", "origin", tag]);
 let release = await api("/repos/" + repo + "/releases/tags/" + tag, "GET", undefined, true);
 if (!release) release = await api("/repos/" + repo + "/releases", "POST", {
-  tag_name: tag, name: "CodexPhone " + tag + " · Windows x64 Preview", draft: true, prerelease: true,
+  tag_name: tag, name: "CodexPhone " + tag + " · Android + Windows Preview", draft: true, prerelease: true,
   body: await readFile(path.join(root, "docs/RELEASE_NOTES.md"), "utf8")
 });
-const assets = (await readdir(releaseDir)).filter((name) => /\.(exe|zip|txt|json|md)$/i.test(name));
 for (const name of assets) {
   const data = await readFile(path.join(releaseDir, name));
   const digest = "sha256:" + createHash("sha256").update(data).digest("hex");

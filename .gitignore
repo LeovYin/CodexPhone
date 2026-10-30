@@ -1,4 +1,13 @@
 node_modules/
+**/.gradle/
+**/build/
+local.properties
+*.jks
+*.keystore
+*.p12
+*.apk
+*.aab
+keystore.properties
 dist/
 .vite/
 coverage/
