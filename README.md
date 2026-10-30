@@ -47,13 +47,13 @@ EXE 内置 Node.js 和原生适配器，不需要安装 pnpm 或编译器。它�
 
 <p align="center"><img src="docs/android-pair.png" width="260" alt="CodexPhone 原生安卓配对页面"></p>
 
-从 [Releases](https://github.com/LeovYin/CodexPhone/releases) 下载 `CodexPhone-0.3.1-android.apk`，安装后打开。电脑端也请在任务空闲时升级到 **0.3.1**，在管理中心绑定账号后，手机填写账号服务 Tailscale 地址（4321 端口）并登录。Android 8.0（API 26）及以上可安装，上一版签名 APK 可直接覆盖升级。
+从 [Releases](https://github.com/LeovYin/CodexPhone/releases) 下载 `CodexPhone-0.3.2-android.apk`，安装后打开。电脑端也请在任务空闲时升级到 **0.3.2**，在管理中心绑定账号后，手机填写账号服务 Tailscale 地址（4321 端口）并登录。Android 8.0（API 26）及以上可安装，上一版签名 APK 可直接覆盖升级。
 
 Kotlin 与 Jetpack Compose 客户端提供原生任务列表、搜索、收藏、新建/继续任务、模型与推理强度、前台实时同步、审批问答、中断、Markdown 表格与图片/SVG 预览。回车换行，点击按钮发送。草稿、最近对话缓存和待确认提交加密保存在本机。弱网提交先查询电脑的请求记录，避免盲目重复执行。
 
 手机进入后台后电脑任务继续，返回应用时补齐状态；本版不提供锁屏推送。APK 使用持续保留的发布密钥签名，GitHub 标为 Preview，便于先在不同手机上验证。安装升级、开发环境与 Kotlin 学习导览见 [安卓说明](apps/android/README.md)。
 
-0.3.1 同步维护 Web 与 Android；后续优先完善安卓体验。排队内容保存在电脑，手机离线后仍会在本轮结束时自动续发。若显示“结果待确认”，先检查电脑对话再移除记录，系统不会自动重复提交。
+0.3.2 同步维护 Web 与 Android；后续优先完善安卓体验。排队内容保存在电脑，手机离线后仍会在本轮结束时自动续发。若显示“结果待确认”，先检查电脑对话再移除记录，系统不会自动重复提交。
 
 ## 工作原理
 

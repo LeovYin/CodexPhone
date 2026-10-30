@@ -4,8 +4,8 @@ Kotlin + Jetpack Compose 客户端，通过已有 Tailscale VPN 连接 Windows C
 
 ## 安装与首次连接
 
-1. 从仓库 Releases 下载 `CodexPhone-0.3.1-android.apk` 并安装，系统要求 Android 8.0+。
-2. 先等电脑上的任务完成，再安装 0.3.1 Windows EXE。在管理中心选择“更新共享服务”，完成后确认 Host 版本为 0.3.1。
+1. 从仓库 Releases 下载 `CodexPhone-0.3.2-android.apk` 并安装，系统要求 Android 8.0+。
+2. 先等电脑上的任务完成，再安装 0.3.2 Windows EXE。在管理中心选择“更新共享服务”，完成后确认 Host 版本为 0.3.2。
 3. 电脑打开“账号与电脑”页，使用至少 12 位密码创建账号并绑定本机。默认账号服务运行于电脑的 4321 端口。
 4. 手机和电脑加入同一个 Tailscale 网络，并打开手机 Tailscale。无需 Serve/Funnel。
 5. 手机填写账号服务的 Tailscale 地址（`http://100.x.x.x:4321`）和账号密码。登录后自动连接绑定的电脑。电脑本机登录服务时才使用 127.0.0.1；手机不可填写该地址。
