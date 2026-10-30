@@ -32,4 +32,24 @@ class CredentialRecoveryTest {
         restored.clearDisplayCache()
         Assert.assertEquals("fixture-persisted-request-0001", ConversationStore(DeviceCredentialStore(app)).data.pending?.requestId)
     }
+    @Test fun successfulServersRemainSelectableAfterLogoutClearsSession() {
+        val credentials = DeviceCredentialStore(app)
+        credentials.saveSession("http://computer-one:4318", "device-token", "device-one")
+        credentials.saveAccount("http://100.64.0.1:4321", "alice", "account-token-one")
+        credentials.saveAccount("http://100.64.0.2:4321", "bob", "account-token-two")
+        Assert.assertEquals("bob", credentials.username)
+        Assert.assertEquals(2, credentials.rememberedServers().size)
+        credentials.selectAccountServer(credentials.rememberedServers().last())
+        Assert.assertEquals("alice", credentials.username)
+        Assert.assertNull(credentials.accountToken())
+        credentials.saveAccount("http://100.64.0.1:4321", "alice", "account-token-one")
+        credentials.clearToken()
+        Assert.assertNull(credentials.token())
+        Assert.assertNull(credentials.accountToken())
+        Assert.assertEquals("alice", credentials.username)
+        Assert.assertEquals(2, credentials.rememberedServers().size)
+        credentials.removeRememberedServer("http://100.64.0.1:4321", "alice")
+        Assert.assertEquals("bob", credentials.username)
+        Assert.assertEquals(1, credentials.rememberedServers().size)
+    }
 }

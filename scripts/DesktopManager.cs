@@ -24,13 +24,14 @@ internal sealed class DesktopManager
     private StackPanel deviceList;
     private DispatcherTimer timer;
     private bool refreshing, busy;
+    private Process startupProcess;
     private readonly List<Button> actions = new List<Button>();
     private const string Xaml = @"<Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' Title='CodexPhone 连接管理中心' Width='1100' Height='760' MinWidth='1000' MinHeight='700' WindowStartupLocation='CenterScreen' Background='#F4F6FA' FontFamily='Microsoft YaHei UI' FontSize='14' Foreground='#182338'>
 <Window.Resources>
- <Style TargetType='Button'><Setter Property='Background' Value='White'/><Setter Property='BorderBrush' Value='#D8DFE9'/><Setter Property='Foreground' Value='#182338'/><Setter Property='Padding' Value='18,10'/><Setter Property='Margin' Value='0,0,10,8'/><Setter Property='Cursor' Value='Hand'/><Setter Property='Template'><Setter.Value><ControlTemplate TargetType='Button'><Border x:Name='b' Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='1' CornerRadius='7' Padding='{TemplateBinding Padding}'><ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/></Border><ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='b' Property='Opacity' Value='.8'/></Trigger><Trigger Property='IsEnabled' Value='False'><Setter TargetName='b' Property='Opacity' Value='.45'/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>
+ <Style TargetType='Button'><Setter Property='Background' Value='White'/><Setter Property='BorderBrush' Value='#C9D3E2'/><Setter Property='Foreground' Value='#24334D'/><Setter Property='Padding' Value='16,10'/><Setter Property='Margin' Value='0,0,10,8'/><Setter Property='Cursor' Value='Hand'/><Setter Property='FontWeight' Value='SemiBold'/><Setter Property='Template'><Setter.Value><ControlTemplate TargetType='Button'><Border x:Name='b' Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='1' CornerRadius='7' Padding='{TemplateBinding Padding}'><ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/></Border><ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='b' Property='Background' Value='#EDF3FF'/><Setter TargetName='b' Property='BorderBrush' Value='#8EA9DF'/></Trigger><Trigger Property='IsPressed' Value='True'><Setter TargetName='b' Property='Background' Value='#DCE8FF'/></Trigger><Trigger Property='IsEnabled' Value='False'><Setter TargetName='b' Property='Background' Value='#F1F3F6'/><Setter TargetName='b' Property='BorderBrush' Value='#E0E4EA'/><Setter TargetName='b' Property='Foreground' Value='#7B8797'/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>
  <Style TargetType='TextBox'><Setter Property='Padding' Value='10,9'/><Setter Property='BorderBrush' Value='#D8DFE9'/><Setter Property='VerticalContentAlignment' Value='Center'/><Setter Property='Margin' Value='0,6,0,16'/></Style>
  <Style TargetType='PasswordBox'><Setter Property='Padding' Value='10,9'/><Setter Property='BorderBrush' Value='#D8DFE9'/><Setter Property='Margin' Value='0,6,0,16'/></Style>
- <Style TargetType='TabItem'><Setter Property='Padding' Value='24,12'/><Setter Property='FontSize' Value='15'/></Style>
+ <Style TargetType='TabItem'><Setter Property='Padding' Value='20,11'/><Setter Property='FontSize' Value='14'/><Setter Property='Foreground' Value='#52627A'/><Setter Property='Background' Value='#E9EDF4'/><Setter Property='BorderBrush' Value='#D9E0E9'/><Setter Property='Template'><Setter.Value><ControlTemplate TargetType='TabItem'><Border x:Name='tab' Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}' BorderThickness='0,0,0,2' Padding='{TemplateBinding Padding}' Margin='0,0,4,0'><ContentPresenter ContentSource='Header' HorizontalAlignment='Center' VerticalAlignment='Center'/></Border><ControlTemplate.Triggers><Trigger Property='IsSelected' Value='True'><Setter TargetName='tab' Property='Background' Value='White'/><Setter TargetName='tab' Property='BorderBrush' Value='#315FCA'/><Setter Property='Foreground' Value='#244FAE'/></Trigger><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='tab' Property='Background' Value='#F7F9FC'/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>
 </Window.Resources>
 <Grid><Grid.ColumnDefinitions><ColumnDefinition Width='220'/><ColumnDefinition Width='*'/></Grid.ColumnDefinitions>
 <Border Background='#182B4A'><DockPanel Margin='24,28'><StackPanel DockPanel.Dock='Top'><TextBlock Text='CodexPhone' Foreground='White' FontSize='25' FontWeight='Bold'/><TextBlock Text='连接管理中心' Foreground='#B9C8E0' Margin='0,8,0,36'/><TextBlock Text='电脑上的 Codex，&#10;随时在手机上继续。' Foreground='White' TextWrapping='Wrap' FontSize='17' LineHeight='29'/></StackPanel><StackPanel VerticalAlignment='Bottom'><TextBlock x:Name='VersionLabel' Foreground='#B9C8E0'/><TextBlock Text='关闭窗口后，&#10;共享连接和任务继续运行。' Foreground='#B9C8E0' Margin='0,18,0,0' LineHeight='23'/></StackPanel></DockPanel></Border>
@@ -54,7 +55,7 @@ internal sealed class DesktopManager
         computerName.Text = Environment.MachineName;
         Find<TextBlock>("VersionLabel").Text = "版本 " + version + "  /  Windows";
         deviceList = Find<StackPanel>("DeviceList");
-        Bind("Start", async () => { await Script("Start-SharedCodex.ps1", "-WaitForDesktopExit"); });
+        Bind("Start", async () => { await BeginSharedStartup(); });
         Bind("AccountsStart", async () => { await Script("Start-AccountService.ps1", ""); });
         Bind("Upgrade", async () => { if (MessageBox.Show("更新手机桥接会短暂断开手机。请先确认电脑任务已结束；运行中的任务会阻止更新。", "更新共享服务", MessageBoxButton.OKCancel) == MessageBoxResult.OK) await Script("Start-SharedCodex.ps1", "-WaitForDesktopExit -RefreshBridge"); });
         Bind("Register", async () => { await BindAccount(true); }); Bind("Login", async () => { await BindAccount(false); });
@@ -80,6 +81,19 @@ internal sealed class DesktopManager
         finally { busy=false;foreach(var b in actions)b.IsEnabled=true; }
     }
     private Task Open(string target) { Process.Start(new ProcessStartInfo(target){UseShellExecute=true});return Task.FromResult(0); }
+    private Task BeginSharedStartup()
+    {
+        if (startupProcess != null && !startupProcess.HasExited) { status.Text="共享连接正在启动";summary.Text="CodexPhone 正在等待 Codex 正常退出并完成重启；管理中心仍可继续使用。";return Task.FromResult(0); }
+        var info=new ProcessStartInfo("powershell.exe","-NoProfile -ExecutionPolicy Bypass -File \""+Path.Combine(root,"scripts","Start-SharedCodex.ps1")+"\" -WaitForDesktopExit") { UseShellExecute=false,CreateNoWindow=true,WorkingDirectory=root,RedirectStandardOutput=true,RedirectStandardError=true,StandardOutputEncoding=Encoding.UTF8,StandardErrorEncoding=Encoding.UTF8 };
+        info.EnvironmentVariables["CODEXPHONE_UTF8"]="1";
+        var process=new Process{StartInfo=info,EnableRaisingEvents=true};startupProcess=process;
+        DataReceivedEventHandler output=(s,e)=>{if(e.Data!=null)window.Dispatcher.BeginInvoke((Action)(()=>{logs.AppendText(e.Data+Environment.NewLine);logs.ScrollToEnd();if(e.Data.Contains("Waiting for Codex to exit")){status.Text="等待退出 Codex";summary.Text="请先完成电脑任务，再从 Codex 菜单选择退出。无需关闭管理中心；账号服务和其他设置仍可继续操作。";}}));};
+        process.OutputDataReceived+=output;process.ErrorDataReceived+=output;
+        process.Exited+=(s,e)=>window.Dispatcher.BeginInvoke((Action)(async()=>{var failed=process.ExitCode!=0;status.Text=failed?"共享连接未完成":"共享连接启动完成";if(failed)summary.Text="请查看诊断日志中的说明；正在运行的任务未被强制结束。";process.Dispose();if(startupProcess==process)startupProcess=null;await Refresh();}));
+        process.Start();process.BeginOutputReadLine();process.BeginErrorReadLine();
+        status.Text="正在启动共享连接";summary.Text="启动过程在后台进行，管理中心其他功能仍可使用。若需要退出 Codex，请先完成当前任务。";
+        return Task.FromResult(0);
+    }
     private async Task Discover()
     {
         try {
@@ -114,7 +128,9 @@ internal sealed class DesktopManager
         try {
             var data=await Request("/api/admin/status","GET",null);
             status.Text=Convert.ToString(data["status"])=="ready"?"共享连接已就绪":"正在恢复电脑连接";
-            summary.Text="正在运行的任务："+Convert.ToString(data["activeTasks"])+"。关闭管理中心不影响任务。";
+            summary.Text=startupProcess!=null&&!startupProcess.HasExited
+                ? "共享启动正在后台进行；管理中心仍可操作。正在运行的任务："+Convert.ToString(data["activeTasks"])+"。"
+                : "正在运行的任务："+Convert.ToString(data["activeTasks"])+"。关闭管理中心不影响任务。";
             var account=data["account"] as Dictionary<string,object>;
             if(account!=null){accountSummary.Text="已登录："+account["username"]+Environment.NewLine+"绑定电脑："+account["name"]+Environment.NewLine+"电脑连接："+account["url"]+Environment.NewLine+"在手机登录同一账号即可连接。";if(!username.IsKeyboardFocusWithin)username.Text=Convert.ToString(account["username"]);}
             else accountSummary.Text="还没有绑定账号。启用共享连接后，到账号与电脑页面创建账号并绑定。";

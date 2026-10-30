@@ -23,6 +23,7 @@ data class PhoneUiState(
     val pendingStatus: String? = null, val supportsSafeSend: Boolean = false, val realtime: Boolean = false,
     val hostVersion: String? = null,
     val accountsUrl: String = "", val username: String = "",
+    val rememberedServers: List<RememberedAccountServer> = emptyList(),
     val supportsQueue: Boolean = false, val queued: List<QueuedMessage> = emptyList(),
 )
 
@@ -30,7 +31,7 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
     private val credentials = DeviceCredentialStore(application)
     private val local = ConversationStore(credentials)
     private val _state = MutableStateFlow(PhoneUiState(hostUrl = credentials.hostUrl.orEmpty(), accountsUrl = credentials.accountsUrl.orEmpty(), username = credentials.username.orEmpty(),
-        paired = credentials.token() != null, threads = local.data.threads, pending = local.data.pending,
+        paired = credentials.token() != null, threads = local.data.threads, pending = local.data.pending, rememberedServers = credentials.rememberedServers(),
         notice = if (credentials.recoveredData) "已跳过异常对话缓存，登录和草稿已保留。未确认的指令请先检查电脑。" else null))
     val state = _state.asStateFlow()
     private var api: CodexPhoneApi? = null
@@ -57,9 +58,19 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
                 credentials.saveAccount(accounts.baseUrl.toString(), login.account.username, login.token)
             }
             api = CodexPhoneApi(computer.baseUrl.toString(), session.token)
-            _state.update { it.copy(paired = true, hostUrl = computer.baseUrl.toString(), username = login.account.username) }
+            _state.update { it.copy(paired = true, hostUrl = computer.baseUrl.toString(), accountsUrl = accounts.baseUrl.toString().trimEnd('/'), username = login.account.username, rememberedServers = credentials.rememberedServers()) }
             try { refreshNow() } finally { startRealtime() }
         }
+    }
+    fun selectAccountServer(server: RememberedAccountServer) {
+        if (_state.value.paired || _state.value.busy) return
+        credentials.selectAccountServer(server)
+        _state.update { it.copy(accountsUrl = server.url, username = server.username, error = null) }
+    }
+    fun removeRememberedServer(server: RememberedAccountServer) {
+        if (_state.value.paired || _state.value.busy) return
+        credentials.removeRememberedServer(server.url, server.username)
+        _state.update { it.copy(accountsUrl = credentials.accountsUrl.orEmpty(), username = credentials.username.orEmpty(), rememberedServers = credentials.rememberedServers()) }
     }
     private fun connection(): CodexPhoneApi = api ?: CodexPhoneApi(
         credentials.hostUrl ?: error("请先配对电脑"), credentials.token() ?: error("请重新配对电脑")
@@ -330,21 +341,40 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         catch (e: ApiException) { if (e.code != 409) throw e else _state.update { it.copy(notice = "该请求已在其他设备处理") } }
         refreshNow()
     }
-    fun disconnect() {
-        if (_state.value.sending) return
-        work {
-            credentials.deviceId?.let { connection().revoke(it) }
-            val url = credentials.accountsUrl; val token = credentials.accountToken()
-            if (url != null && token != null) CodexPhoneApi(url, token).logoutAccount()
-            clearConnection()
+    fun logout() {
+        if (_state.value.sending || _state.value.busy) return
+        val session = epoch
+        _state.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch {
+            var remoteError: Exception? = null
+            try {
+                withContext(NonCancellable) {
+                    runCatching { credentials.deviceId?.let { connection().revoke(it) } }
+                        .onFailure { remoteError = it as? Exception }
+                    val url = credentials.accountsUrl; val token = credentials.accountToken()
+                    if (url != null && token != null) {
+                        runCatching { CodexPhoneApi(url, token).logoutAccount() }
+                            .onFailure { if (remoteError == null) remoteError = it as? Exception }
+                    }
+                    credentials.clearToken()
+                    clearConnection(cancelPendingOperations = false)
+                }
+                if (remoteError != null) _state.update { it.copy(notice = "已退出登录。本机凭据已清除，但电脑暂时无法确认撤销；可在电脑管理中心移除此设备。") }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (session == epoch) failure(e)
+            } finally {
+                if (session == epoch) _state.update { it.copy(busy = false) }
+            }
         }
     }
     fun forgetLocally() { if (!_state.value.sending) clearConnection() }
-    private fun clearConnection() {
+    private fun clearConnection(cancelPendingOperations: Boolean = true) {
         epoch++; eventJob?.cancel(); pollJob?.cancel(); syncJob?.cancel(); draftJob?.cancel()
         extendedThreads = false; extendedHistory.clear()
-        viewModelScope.coroutineContext.cancelChildren()
-        local.clear(); api = null; _state.value = PhoneUiState(hostUrl = credentials.hostUrl.orEmpty(), accountsUrl = credentials.accountsUrl.orEmpty(), username = credentials.username.orEmpty())
+        if (cancelPendingOperations) viewModelScope.coroutineContext.cancelChildren()
+        local.clear(); api = null; _state.value = PhoneUiState(hostUrl = credentials.hostUrl.orEmpty(), accountsUrl = credentials.accountsUrl.orEmpty(), username = credentials.username.orEmpty(), rememberedServers = credentials.rememberedServers())
     }
     fun imageApi(): CodexPhoneApi? = runCatching { connection() }.getOrNull()
     fun resetDisplayCache() = work {

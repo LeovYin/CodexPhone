@@ -25,7 +25,7 @@ try {
   Push-Location -LiteralPath $androidRoot
   try {
     $tasks = if ($SkipTests) { @(':app:assembleRelease') } else { @(':app:testDebugUnitTest', ':app:lintRelease', ':app:assembleRelease') }
-    & .\gradlew.bat @tasks
+    & .\gradlew.bat $tasks
     if ($LASTEXITCODE -ne 0) { throw 'Android release build or checks failed' }
   } finally { Pop-Location }
   $apk = Join-Path $androidRoot 'app\build\outputs\apk\release\app-release.apk'
@@ -39,6 +39,10 @@ try {
   New-Item -ItemType Directory -Path $output -Force | Out-Null
   $destination = Join-Path $output ('CodexPhone-' + $version + '-android.apk')
   Copy-Item -LiteralPath $apk -Destination $destination -Force
+  Copy-Item -LiteralPath (Join-Path $taskRoot 'docs\RELEASE_NOTES.md') -Destination $output -Force
+  Get-ChildItem -LiteralPath $output -File | Where-Object Name -ne 'SHA256SUMS.txt' | Sort-Object Name | ForEach-Object {
+    (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $_.Name
+  } | Set-Content -LiteralPath (Join-Path $output 'SHA256SUMS.txt') -Encoding ASCII
   Write-Output ('Signed APK ready: ' + $destination)
   Write-Output 'Keep the signing key and password outside Git. Back them up to preserve APK update compatibility.'
 } finally {

@@ -4,14 +4,14 @@ Kotlin + Jetpack Compose 客户端，通过已有 Tailscale VPN 连接 Windows C
 
 ## 安装与首次连接
 
-1. 从仓库 Releases 下载 `CodexPhone-0.3.0-android.apk` 并安装，系统要求 Android 8.0+。
-2. 先等电脑上的任务完成，再安装 0.3.0 Windows EXE。在管理中心选择“更新共享服务”，完成后确认 Host 版本为 0.3.0。
+1. 从仓库 Releases 下载 `CodexPhone-0.3.1-android.apk` 并安装，系统要求 Android 8.0+。
+2. 先等电脑上的任务完成，再安装 0.3.1 Windows EXE。在管理中心选择“更新共享服务”，完成后确认 Host 版本为 0.3.1。
 3. 电脑打开“账号与电脑”页，使用至少 12 位密码创建账号并绑定本机。默认账号服务运行于电脑的 4321 端口。
 4. 手机和电脑加入同一个 Tailscale 网络，并打开手机 Tailscale。无需 Serve/Funnel。
 5. 手机填写账号服务的 Tailscale 地址（`http://100.x.x.x:4321`）和账号密码。登录后自动连接绑定的电脑。电脑本机登录服务时才使用 127.0.0.1；手机不可填写该地址。
 6. 打开已有任务，或选择电脑端允许启动的项目新建任务。回车换行，发送箭头提交。
 
-账号会话持续 30 天，同一手机无需重复绑定。默认 SQLite 数据库位于电脑 `%USERPROFILE%/.codexphone/accounts/`。账号服务和桥接只应通过可信的内网/Tailscale 访问。
+账号会话持续 30 天，同一手机无需重复绑定。成功登录的服务器和用户名会记在手机上；在“设置”中退出登录后，可从地址框的下拉菜单切换服务器。密码不会保存。默认 SQLite 数据库位于电脑 `%USERPROFILE%/.codexphone/accounts/`。账号服务和桥接只应通过可信的内网/Tailscale 访问。
 
 后续同签名、更高 versionCode 的 APK 可直接覆盖安装。若安装过本地 Debug APK，签名不同，需要先卸载；卸载会移除手机草稿与凭据。首次安装可为浏览器临时允许“安装未知应用”，安装后可关闭此权限。
 

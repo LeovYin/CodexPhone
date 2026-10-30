@@ -28,10 +28,38 @@ class DeviceCredentialStore(context: Context) {
     val deviceId: String? get() = string("device-id")
     val accountsUrl: String? get() = string("accounts-url")
     val username: String? get() = string("account-username")
+    fun rememberedServers(): List<RememberedAccountServer> = runCatching {
+        val saved = org.json.JSONArray(string("remembered-account-servers") ?: "[]")
+        (0 until saved.length()).mapNotNull { index ->
+            val item = saved.optJSONObject(index) ?: return@mapNotNull null
+            val url = item.optString("url").takeIf(String::isNotBlank) ?: return@mapNotNull null
+            val name = item.optString("username").takeIf(String::isNotBlank) ?: return@mapNotNull null
+            RememberedAccountServer(url, name)
+        }
+    }.getOrDefault(emptyList())
     val installationId: String get() = string("installation-id") ?: java.util.UUID.randomUUID().toString().also { preferences.edit().putString("installation-id", it).commit() }
     fun accountToken(): String? = string("account-token")?.let { runCatching { decrypt(it) }.getOrNull() }
     fun saveAccount(url: String, username: String, token: String) {
-        check(preferences.edit().putString("accounts-url", url).putString("account-username", username).putString("account-token", encrypt(token)).commit())
+        val server = RememberedAccountServer(url.trimEnd('/'), username.trim())
+        val updated = (listOf(server) + rememberedServers().filterNot { it.url.equals(server.url, true) && it.username.equals(server.username, true) }).take(10)
+        val packed = org.json.JSONArray().apply { updated.forEach { put(org.json.JSONObject().put("url", it.url).put("username", it.username)) } }.toString()
+        check(preferences.edit().putString("accounts-url", server.url).putString("account-username", server.username)
+            .putString("remembered-account-servers", packed).putString("account-token", encrypt(token)).commit())
+    }
+    fun selectAccountServer(server: RememberedAccountServer) {
+        val editor = preferences.edit().putString("accounts-url", server.url).putString("account-username", server.username)
+        if (!accountsUrl.equals(server.url, true) || !username.equals(server.username, true)) editor.remove("account-token")
+        check(editor.commit())
+    }
+    fun removeRememberedServer(url: String, username: String) {
+        val updated = rememberedServers().filterNot { it.url.equals(url, true) && it.username.equals(username, true) }
+        val packed = org.json.JSONArray().apply { updated.forEach { put(org.json.JSONObject().put("url", it.url).put("username", it.username)) } }.toString()
+        val editor = preferences.edit().putString("remembered-account-servers", packed)
+        if (accountsUrl.equals(url, true) && this.username.equals(username, true)) {
+            val fallback = updated.firstOrNull()
+            editor.putString("accounts-url", fallback?.url ?: "").putString("account-username", fallback?.username ?: "").remove("account-token")
+        }
+        check(editor.commit())
     }
     fun saveSession(host: String, token: String, deviceId: String) {
         check(preferences.edit().putString(KEY_HOST, host).putString("device-id", deviceId)
