@@ -80,7 +80,7 @@ function App() {
   }, []);
   const [newTask, setNewTask] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [filter, setFilter] = useState<"all" | "pinned">("all");
+  const [filter, setFilter] = useState<"all" | "running" | "pinned">("all");
   const [approvalAnswers, setApprovalAnswers] = useState<Record<string, string>>({});
   const [globalApprovals, setGlobalApprovals] = useState<ApprovalRequest[]>([]);
   const [deferredQuestion, setDeferredQuestion] = useState<string | null>(null);
@@ -239,7 +239,7 @@ function App() {
     } catch (caught) { setError(errorMessage(caught)); } finally { setLoadingOlder(false); }
   };
 
-  const visibleThreads = useMemo(() => filter === "pinned" ? threads.filter((thread) => thread.isPinned) : threads, [filter, threads]);
+  const visibleThreads = useMemo(() => threads.filter((thread) => filter === "pinned" ? thread.isPinned : filter === "running" ? Boolean(thread.activeTurnId) : true), [filter, threads]);
 
   const pair = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -363,11 +363,12 @@ function App() {
       </div>
       <nav className="thread-filter" aria-label="对话筛选">
         <button className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}><MessageSquareText size={15} />全部</button>
+        <button className={filter === "running" ? "active" : ""} onClick={() => setFilter("running")}><Activity size={15} />运行中</button>
         <button className={filter === "pinned" ? "active" : ""} onClick={() => setFilter("pinned")}><Pin size={15} />重点</button>
       </nav>
       <div className="thread-list" aria-label="对话列表">
         {loading && !threads.length ? <div className="empty-state"><LoaderCircle className="spin" size={19} />加载对话</div> : null}
-        {!loading && !visibleThreads.length ? <div className="empty-state">{filter === "pinned" ? "还没有重点对话" : "当前项目暂无对话"}</div> : null}
+        {!loading && !visibleThreads.length ? <div className="empty-state">{filter === "pinned" ? "还没有重点对话，点击对话星标即可收藏" : filter === "running" ? "当前没有运行中的任务" : !isOnline ? "电脑暂不可用，请检查管理中心和 Tailscale" : "当前项目暂无对话，可切换项目或新建任务"}</div> : null}
         {visibleThreads.map((thread) => <button key={thread.id} className={`thread-row ${thread.id === selectedId ? "selected" : ""}`} onClick={() => { setNewTask(false); void loadThread(thread.id); }}>
           <span className="thread-row-top"><span className="thread-title">{threadLabel(thread)}</span><span className="thread-time">{relativeTime(thread.updatedAt)}</span></span>
           <span className="thread-preview">{thread.preview || thread.cwd || "Codex 对话"}</span>

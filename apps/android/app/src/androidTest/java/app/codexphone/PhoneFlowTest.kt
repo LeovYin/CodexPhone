@@ -129,6 +129,22 @@ class PhoneFlowTest {
         }.toString()
     }
     private fun connected() { compose.waitUntil(20000) { vm.state.value.threads.isNotEmpty() || vm.state.value.error != null }; Assert.assertTrue(vm.state.value.error ?: "Fixture did not connect", vm.state.value.threads.isNotEmpty()) }
+    @Test fun taskFiltersExplainEmptyStatesAndReturnToAllTasks() {
+        connected()
+        compose.onNodeWithText("运行中", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("当前没有运行中的任务").assertExists()
+        compose.onNodeWithText("收藏", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("还没有收藏对话").assertExists()
+        compose.onNodeWithText("全部", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("共享测试任务").assertExists()
+    }
+    @Test fun loginPageExplainsAccountPort() {
+        connected()
+        compose.runOnIdle { vm.forgetLocally() }
+        compose.waitUntil(5000) { !vm.state.value.paired }
+        compose.onNodeWithText("账号服务地址").assertExists()
+        screenshot("login-page-test.png")
+    }
     @After fun cleanup() {
         vm.setForeground(false)
         // MockWebServer owns accepted sockets; cancel() expects a client Call.
@@ -174,6 +190,8 @@ class PhoneFlowTest {
         compose.onNodeWithContentDescription("排队发送").performClick()
         compose.waitUntil(15000) { vm.state.value.queued.size == 1 && vm.state.value.pending == null }
         Assert.assertEquals(1, submissions.size)
+        compose.onNodeWithText("引导", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("排队消息 1 · 展开").performClick()
         screenshot("queue-test.png")
         compose.onNodeWithText("引导", useUnmergedTree = true).performClick()
         compose.waitUntil(15000) { guided && vm.state.value.queued.isEmpty() && vm.state.value.pending == null }

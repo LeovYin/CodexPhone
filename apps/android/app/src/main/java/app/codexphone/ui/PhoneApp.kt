@@ -137,7 +137,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
             if (s.busy) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp) else Text("登录并连接电脑")
         }
         s.error?.let { ErrorMessage(it) }
-        Text("首次在电脑创建账号并绑定工作站。手机保持登录，无需反复输入配对码。请先开启 Tailscale。", Modifier.padding(top = 18.dp), color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
+        Text("先在电脑管理中心开始连接并创建账号。手机填写管理中心显示的账号服务地址（默认端口 4321）；4318 是电脑任务连接端口。请先开启 Tailscale。", Modifier.padding(top = 18.dp), color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         Text("CodexPhone " + BuildConfig.VERSION_NAME, Modifier.padding(top = 24.dp), color = Muted, fontSize = 12.sp)
     }
 }
@@ -158,6 +158,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     }
 }
 @Composable private fun ThreadListScreen(s: PhoneUiState, vm: PhoneViewModel, modifier: Modifier) {
+    var threadFilter by remember { mutableStateOf("all") }
     Column(modifier.fillMaxSize()) {
         Header("CodexPhone", if (s.realtime) "与电脑实时同步" else "等待连接 · 缓存可浏览", s, vm)
         s.notice?.let { Info(it) }
@@ -173,12 +174,34 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
                 FilterChip(s.selectedProjectId == p.id, { vm.selectProject(p.id) }, label = { Text(p.name) })
             }
         }
+        Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(threadFilter == "all", { threadFilter = "all" }, label = { Text("全部") })
+            FilterChip(threadFilter == "running", { threadFilter = "running" }, label = { Text("运行中") })
+            FilterChip(threadFilter == "pinned", { threadFilter = "pinned" }, label = { Text("收藏") })
+        }
         if (!s.supportsSafeSend) Info("电脑端需要更新至 0.2.0，才能启用可靠发送。")
         s.pending?.let { PendingBanner(s, vm) }
         s.error?.let { ErrorMessage(it) }
-        if (s.threads.isEmpty()) EmptyState("还没有可显示的对话", "检查连接或切换项目，然后点击刷新。", Modifier.weight(1f))
+        val visibleThreads = s.threads.filter { thread -> when (threadFilter) {
+            "running" -> thread.activeTurnId != null
+            "pinned" -> thread.isPinned
+            else -> true
+        } }.sortedByDescending { it.isPinned }
+        if (visibleThreads.isEmpty()) {
+            val (emptyTitle, emptyDetail) = when {
+                s.threads.isEmpty() && s.query.isNotBlank() -> "没有匹配的对话" to "试试其他关键词，或清除搜索内容。"
+                s.threads.isEmpty() && s.selectedProjectId != null -> "此项目还没有对话" to "切换项目，或点击 + 为此电脑创建新任务。"
+                s.threads.isEmpty() && s.hostStatus?.status != "ready" -> "电脑暂时无法连接" to "确认电脑管理中心已开始连接、两端 Tailscale 在线，再点右上角刷新。"
+                s.threads.isEmpty() && s.projects.none(Project::canStart) -> "先登记一个项目" to "在电脑管理中心打开 Web 客户端，点击管理项目添加目录，然后回到手机刷新。已有电脑对话仍可浏览。"
+                s.threads.isEmpty() -> "还没有电脑对话" to "点击 +，选择已登记项目，描述你希望 Codex 完成的任务。"
+                threadFilter == "running" -> "当前没有运行中的任务" to "正在执行的任务会自动出现在这里。"
+                else -> "还没有收藏对话" to "在对话右侧点星标即可收藏，之后可在这里快速找到。"
+            }
+            EmptyState(emptyTitle, emptyDetail, Modifier.weight(1f))
+            if (s.nextCursor != null) TextButton(vm::loadMoreThreads, Modifier.fillMaxWidth(), enabled = !s.busy) { Text("继续加载更多对话") }
+        }
         else LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 16.dp)) {
-            items(s.threads.sortedByDescending { it.isPinned }, key = { it.id }) { thread ->
+            items(visibleThreads, key = { it.id }) { thread ->
                 Column(Modifier.fillMaxWidth().clickable { vm.openThread(thread.id) }.padding(start = 20.dp, end = 12.dp, top = 12.dp, bottom = 8.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(thread.name?.takeIf(String::isNotBlank) ?: "未命名对话", Modifier.weight(1f),
@@ -249,6 +272,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     var confirmStop by remember { mutableStateOf(false) }
     var navigation by remember { mutableStateOf(false) }
     var reviewedQueue by remember { mutableStateOf<QueuedMessage?>(null) }
+    var queueExpanded by remember(s.selectedThreadId) { mutableStateOf(false) }
     var initiallyPositioned by remember(s.selectedThreadId) { mutableStateOf(false) }
     var followLatest by remember(s.selectedThreadId) { mutableStateOf(true) }
     var positioning by remember { mutableStateOf(false) }
@@ -296,8 +320,14 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         bottomBar = {
             Surface(color = Color.White, shadowElevation = 3.dp) {
                 Column(Modifier.navigationBarsPadding().imePadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
-                    if (s.queued.any { it.threadId == s.selectedThreadId }) Column(Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
-                        s.queued.filter { it.threadId == s.selectedThreadId }.forEach { message ->
+                    val threadQueue = s.queued.filter { it.threadId == s.selectedThreadId }
+                    if (threadQueue.isNotEmpty()) TextButton({ queueExpanded = !queueExpanded }, Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)) {
+                        Text("排队消息 ${threadQueue.size} · ${if (queueExpanded) "收起" else "展开"}")
+                        Icon(if (queueExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, Modifier.size(18.dp))
+                    }
+                    if (queueExpanded && threadQueue.isNotEmpty()) Column(Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
+                        threadQueue.forEach { message ->
                             Surface(color = Color(0xFFE8EEFC), shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(bottom = 6.dp)) {
                                 Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
@@ -322,11 +352,11 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
                     Row(verticalAlignment = Alignment.Bottom) {
                         OutlinedTextField(s.draft, vm::editDraft, Modifier.weight(1f).heightIn(min = 50.dp, max = 180.dp),
                             placeholder = { Text(if (running) "发送后排队，可点击引导干预…" else "输入消息，回车换行…") },
-                            maxLines = 6, shape = RoundedCornerShape(16.dp),
+                            maxLines = 6, shape = RoundedCornerShape(16.dp), enabled = !s.composingNew || s.projects.any(Project::canStart),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default, capitalization = KeyboardCapitalization.Sentences))
                         Spacer(Modifier.width(8.dp))
                         FilledIconButton({ vm.send() }, Modifier.size(48.dp),
-                            enabled = s.draft.isNotBlank() && s.pending == null && !s.sending && s.supportsSafeSend && s.hostStatus?.status == "ready") {
+                            enabled = s.draft.isNotBlank() && s.pending == null && !s.sending && s.supportsSafeSend && s.hostStatus?.status == "ready" && (!s.composingNew || s.projects.any { it.id == s.selectedProjectId && it.canStart })) {
                             if (s.sending) CircularProgressIndicator(Modifier.size(21.dp), color = Color.White, strokeWidth = 2.dp)
                             else Icon(Icons.AutoMirrored.Filled.Send, if (running) "排队发送" else "发送消息")
                         }
@@ -343,7 +373,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
                         FilterChip(s.selectedProjectId == p.id, { vm.selectProject(p.id) }, label = { Text(p.name) })
                     }
                 }
-                if (s.projects.none(Project::canStart)) Info("请先在电脑或网页端登记可启动的项目。")
+                if (s.projects.none(Project::canStart)) Info("尚未登记可启动项目。在电脑管理中心打开 Web 客户端，点击“管理项目”添加目录，再回到手机刷新。")
             }
             if (s.pending != null) PendingBanner(s, vm)
             s.error?.let { ErrorMessage(it) }
@@ -415,10 +445,16 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     var confirm by remember { mutableStateOf(false) }
     Surface(color = Color(0xFFFFF3DA)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp)) {
-            Text(if (s.pendingStatus == "failed") "电脑未完成本次提交，请先检查对话。" else "有一条消息等待电脑确认。草稿已保留。", fontSize = 12.sp, color = Color(0xFF785519))
+            Text(when (s.pendingStatus) {
+                "failed" -> "电脑未完成本次提交。查看对话后，可保留草稿继续处理。"
+                "not-found" -> "电脑暂未记录这条消息。可安全重试，使用同一编号避免重复。"
+                "unknown" -> "暂时无法确认电脑是否收到。先查询结果或查看对话，草稿已保留。"
+                else -> "正在等待电脑确认消息，草稿已保留。"
+            }, fontSize = 12.sp, color = Color(0xFF785519))
             Row {
                 TextButton(vm::checkPending, enabled = !s.busy && !s.sending) { Text("查询结果", fontSize = 12.sp) }
-                if (s.pendingStatus == "not-found") TextButton(vm::retryPending, enabled = !s.sending) { Text("原编号重试", fontSize = 12.sp) }
+                if (s.pending?.threadId != null && s.selectedThreadId != s.pending.threadId) TextButton(vm::viewPendingConversation) { Text("查看对话", fontSize = 12.sp) }
+                if (s.pendingStatus == "not-found") TextButton(vm::retryPending, enabled = !s.sending) { Text("安全重试", fontSize = 12.sp) }
                 if (s.pendingStatus in listOf("failed", "unknown")) TextButton({ confirm = true }, enabled = !s.sending) { Text("已检查对话", fontSize = 12.sp) }
             }
         }

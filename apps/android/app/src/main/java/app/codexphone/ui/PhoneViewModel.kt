@@ -299,6 +299,10 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         } finally { if (session == epoch) _state.update { it.copy(sending = false) } }
     }
     fun checkPending() = work { reconcilePending() }
+    fun viewPendingConversation() {
+        val pending = _state.value.pending ?: return
+        if (pending.threadId != null) openThread(pending.threadId) else newTask()
+    }
     private suspend fun reconcilePending() {
         val pending = _state.value.pending ?: return
         try {

@@ -144,6 +144,17 @@ test("project filters, favorites, pagination, approvals and unpair controls", as
   await page.getByRole("button", { name: "解除本机配对", exact: true }).click(); await expect(page.getByRole("button", { name: "配对设备", exact: true })).toBeVisible();
 });
 
+test("running filter remains usable when there are no matching loaded tasks", async ({ page }) => {
+  const state = await setupFixture(page); state.more = true;
+  await page.goto("/");
+  await expect(page.locator(".thread-row")).toHaveCount(2);
+  await page.getByRole("button", { name: "运行中", exact: true }).click();
+  await expect(page.getByText("当前没有运行中的任务", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "加载更多对话", exact: true }).click();
+  await page.getByRole("button", { name: "全部", exact: true }).click();
+  await expect(page.locator(".thread-row")).toHaveCount(3);
+});
+
 test("streamed fragments survive a persisted-history refresh", async ({ page }) => {
   const state = await setupFixture(page); state.running = true; state.content = "开始";
   await page.goto("/"); await page.getByRole("button", { name: /手机界面与内容渲染/ }).click();

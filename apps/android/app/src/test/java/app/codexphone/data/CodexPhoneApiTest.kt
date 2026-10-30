@@ -41,6 +41,20 @@ class CodexPhoneApiTest {
             assertEquals("one-use-code", body["code"]?.jsonPrimitive?.content)
         }
     }
+    @Test fun loginExplainsWhenThePhoneBridgePortIsUsedForAccountLogin() = runBlocking {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setResponseCode(404).setBody("""{"error":"Not Found"}"""))
+            val api = CodexPhoneApi(server.url("/").newBuilder().host("127.0.0.1").build().toString())
+            try {
+                api.login("alice", "secret", "fixture-installation", "Test phone")
+                fail("A bridge port does not expose the account login endpoint")
+            } catch (error: IOException) {
+                assertTrue(error.message.orEmpty().contains("4321"))
+                assertTrue(error.message.orEmpty().contains("4318"))
+            }
+            assertEquals("/v1/login", server.takeRequest().path)
+        }
+    }
     @Test fun submissionRetainsRequestIdentityAndSelection() = runBlocking {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("""{"threadId":"shared-thread"}"""))

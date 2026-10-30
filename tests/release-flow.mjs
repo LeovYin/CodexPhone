@@ -32,6 +32,10 @@ const waitForStopped = (url, label) => waitFor(async () => {
 try {
   execFileSync(executable, ["--extract-only", extracted], { windowsHide: true, timeout: 90_000, stdio: "pipe" });
   console.log("release test: EXE extracted");
+  const preview = path.join(temporary, "desktop-preview.png");
+  execFileSync(executable, ["--render-preview", preview], { windowsHide: true, timeout: 30_000, stdio: "pipe" });
+  assert.equal((await readFile(preview)).subarray(1, 4).toString(), "PNG");
+  console.log("release test: desktop XAML rendered");
   const node = path.join(extracted, "runtime/node.exe");
   const bundledVersion = execFileSync(node, ["--version"], { encoding: "utf8", windowsHide: true }).trim();
   assert.match(bundledVersion, /^v24\./);
@@ -59,7 +63,7 @@ try {
   try {
     await waitFor(() => { const match = accountsLog.match(/"address":\[\{"address":"127\.0\.0\.1","family":"IPv4","port":(\d+)\}\]/); if (match) { accountsUrl = "http://127.0.0.1:" + match[1]; return true; } return false; }, "packaged SQLite account service");
     console.log("release test: packaged account service ready");
-    const health = await (await timedFetch(accountsUrl + "/health")).json(); assert.equal(health.storage, "sqlite"); assert.equal(health.version, "0.3.4");
+    const health = await (await timedFetch(accountsUrl + "/health")).json(); assert.equal(health.storage, "sqlite"); assert.equal(health.version, "0.3.5");
     const secret = (await readFile(path.join(accountsHome, "admin-token"), "utf8")).trim();
     const register = await timedFetch(accountsUrl + "/v1/register", { method: "POST", headers: { Authorization: "Bearer " + secret, "Content-Type": "application/json" }, body: JSON.stringify({ username: "张三", password: "abc123" }) }); assert.equal(register.status, 200);
     const login = await timedFetch(accountsUrl + "/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "张三", password: "abc123", installationId: "release-phone-installation-001" }) }); assert.equal(login.status, 200);
@@ -77,7 +81,7 @@ try {
     seededService = spawn(node, [path.join(extracted, "apps/host/dist/account-service.js")], { env: upgradeEnv, cwd: extracted, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     seededService.stdout.on("data", () => {}); seededService.stderr.on("data", () => {});
     const upgradeUrl = "http://127.0.0.1:" + upgradePort;
-    await waitFor(async () => { try { return (await (await timedFetch(upgradeUrl + "/health")).json()).version === "0.3.4"; } catch { return false; } }, "initial account service for upgrade fixture");
+    await waitFor(async () => { try { return (await (await timedFetch(upgradeUrl + "/health")).json()).version === "0.3.5"; } catch { return false; } }, "initial account service for upgrade fixture");
     const upgradeSecret = (await readFile(path.join(upgradeHome, "admin-token"), "utf8")).trim();
     const seeded = await timedFetch(upgradeUrl + "/v1/register", { method: "POST", headers: { Authorization: "Bearer " + upgradeSecret, "Content-Type": "application/json" }, body: JSON.stringify({ username: "survivor", password: "keep123" }) }); assert.equal(seeded.status, 200);
     await timedFetch(upgradeUrl + "/admin/shutdown", { method: "POST", headers: { Authorization: "Bearer " + upgradeSecret } });
@@ -93,7 +97,7 @@ try {
     console.log("release test: stale account service fixture ready");
     execFileSync(powershell, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path.join(extracted, "scripts/Start-AccountService.ps1"), "-Port", String(upgradePort), "-AccountsHome", upgradeHome], { env: upgradeEnv, windowsHide: true, stdio: "ignore", timeout: 90_000 });
     console.log("release test: account service launch script returned");
-    await waitFor(async () => { try { return (await (await timedFetch(upgradeUrl + "/health")).json()).version === "0.3.4"; } catch { return false; } }, "upgraded account service");
+    await waitFor(async () => { try { return (await (await timedFetch(upgradeUrl + "/health")).json()).version === "0.3.5"; } catch { return false; } }, "upgraded account service");
     console.log("release test: upgraded service is healthy");
     const relogin = await timedFetch(upgradeUrl + "/v1/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username: "survivor", password: "keep123", installationId: "upgrade-survival-phone-001" }) }); assert.equal(relogin.status, 200);
     console.log("release test: old account login passed");

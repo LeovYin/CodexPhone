@@ -25,9 +25,17 @@ class CodexPhoneApi(
     private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun health(): HostStatus = get("api/health")
-    suspend fun login(username: String, password: String, installationId: String, name: String): AccountLogin = post("v1/login", buildJsonObject {
-        put("username", username); put("password", password); put("installationId", installationId); put("name", name); put("kind", "phone")
-    }, false)
+    suspend fun login(username: String, password: String, installationId: String, name: String): AccountLogin = try {
+        post("v1/login", buildJsonObject {
+            put("username", username); put("password", password); put("installationId", installationId); put("name", name); put("kind", "phone")
+        }, false)
+    } catch (error: ApiException) {
+        if (error.code == 404) throw IOException(
+            "此地址没有账号登录接口。手机应填写账号服务地址（默认端口 4321）；电脑任务连接端口 4318 不能用于登录。",
+            error,
+        )
+        throw error
+    }
     suspend fun logoutAccount(): JsonObject = post("v1/logout", buildJsonObject {})
     suspend fun connectAccount(accountToken: String): PairResponse = post("api/account/connect", buildJsonObject { put("token", accountToken) }, false)
     suspend fun capabilities(): Capabilities = get("api/capabilities")
@@ -124,7 +132,7 @@ class CodexPhoneApi(
             .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build()
         fun normalizeBaseUrl(input: String): HttpUrl {
             val value = input.trim().let { if ("://" in it) it else "http://" + it }.trimEnd('/') + "/"
-            val url = value.toHttpUrlOrNull() ?: throw IOException("请输入有效的电脑地址，例如 http://100.x.x.x:4318")
+            val url = value.toHttpUrlOrNull() ?: throw IOException("请输入有效的账号服务地址，例如 http://100.x.x.x:4321")
             if (url.encodedUsername.isNotEmpty() || url.encodedPassword.isNotEmpty() ||
                 url.encodedPath != "/" || url.query != null || url.fragment != null) throw IOException("电脑地址只填写主机和端口")
             if (url.scheme == "http" && !privateHost(url.host)) throw IOException("HTTP 只允许 Tailscale 或内网电脑地址；公网请使用 HTTPS")
