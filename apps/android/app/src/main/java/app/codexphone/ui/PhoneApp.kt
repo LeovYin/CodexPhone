@@ -7,6 +7,8 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -93,10 +95,15 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable private fun PairScreen(s: PhoneUiState, vm: PhoneViewModel) {
     var username by remember { mutableStateOf(s.username) }
     var password by remember { mutableStateOf("") }
     var serverMenu by remember { mutableStateOf(false) }
+    val keyboard = LocalSoftwareKeyboardController.current
+    val focus = LocalFocusManager.current
+    val errorTarget = remember { BringIntoViewRequester() }
+    LaunchedEffect(s.error) { if (s.error != null) errorTarget.bringIntoView() }
     Column(Modifier.fillMaxSize().background(Background).statusBarsPadding().navigationBarsPadding()
         .imePadding().verticalScroll(rememberScrollState()).padding(24.dp)) {
         Spacer(Modifier.height(36.dp))
@@ -133,10 +140,11 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         OutlinedTextField(password, { password = it }, Modifier.fillMaxWidth(), label = { Text("密码") },
             singleLine = true, visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false), enabled = !s.busy)
-        Button({ vm.login(username, password) }, Modifier.fillMaxWidth().padding(top = 20.dp).height(52.dp), enabled = !s.busy && username.isNotBlank() && password.isNotEmpty()) {
+        Button({ keyboard?.hide(); focus.clearFocus(); vm.login(username, password) }, Modifier.fillMaxWidth().padding(top = 20.dp).height(52.dp), enabled = !s.busy && username.isNotBlank() && password.isNotEmpty()) {
             if (s.busy) CircularProgressIndicator(Modifier.size(22.dp), color = Color.White, strokeWidth = 2.dp) else Text("登录并连接电脑")
         }
-        s.error?.let { ErrorMessage(it) }
+        s.connectionStep?.let { Text(it, Modifier.padding(top = 12.dp), color = Blue, fontSize = 13.sp) }
+        Box(Modifier.fillMaxWidth().bringIntoViewRequester(errorTarget)) { s.error?.let { ErrorMessage(it) } }
         Text("先在电脑管理中心开始连接并创建账号。手机填写管理中心显示的账号服务地址（默认端口 4321）；4318 是电脑任务连接端口。请先开启 Tailscale。", Modifier.padding(top = 18.dp), color = Muted, fontSize = 13.sp, lineHeight = 20.sp)
         Text("CodexPhone " + BuildConfig.VERSION_NAME, Modifier.padding(top = 24.dp), color = Muted, fontSize = 12.sp)
     }
@@ -549,7 +557,35 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     }
 }
 @Composable private fun ErrorMessage(message: String) {
-    Text(message, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), color = Color(0xFFA33F38), fontSize = 12.sp, lineHeight = 18.sp)
+    ConnectionErrorCard(message)
+}
+@Composable internal fun ConnectionErrorCard(message: String) {
+    var expanded by remember(message) { mutableStateOf(false) }
+    var copied by remember(message) { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    val parts = message.split("\n诊断：", limit = 2)
+    val summary = parts.first()
+    Surface(Modifier.fillMaxWidth().padding(vertical = 8.dp), color = Color(0xFFFFF1EE),
+        shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, Color(0xFFECC4BD))) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Icon(Icons.Default.ErrorOutline, null, Modifier.size(20.dp), tint = Color(0xFFAA3F32))
+                Text("操作未完成", color = Color(0xFF8A3027), fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            }
+            Text(summary, Modifier.padding(top = 8.dp).heightIn(max = 180.dp).verticalScroll(rememberScrollState()),
+                color = Color(0xFF893F36), fontSize = 13.sp, lineHeight = 20.sp)
+            if (expanded && parts.size == 2) Text("诊断：" + parts[1],
+                Modifier.padding(top = 8.dp).heightIn(max = 160.dp).verticalScroll(rememberScrollState()),
+                color = Muted, fontSize = 12.sp, lineHeight = 18.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (parts.size == 2) TextButton({ expanded = !expanded }) { Text(if (expanded) "收起诊断" else "查看诊断") }
+                TextButton({ clipboard.setText(AnnotatedString(message)); copied = true }) {
+                    Icon(Icons.Default.ContentCopy, null, Modifier.size(15.dp))
+                    Spacer(Modifier.width(6.dp)); Text(if (copied) "已复制" else "复制错误信息")
+                }
+            }
+        }
+    }
 }
 @Composable private fun Info(message: String) {
     Text(message, Modifier.fillMaxWidth().background(Color(0xFFE8EEFC)).padding(12.dp), color = Muted, fontSize = 12.sp, lineHeight = 18.sp)

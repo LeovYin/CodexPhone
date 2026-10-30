@@ -13,6 +13,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.IOException
+import java.net.ProxySelector
 import java.util.concurrent.TimeUnit
 
 class ApiException(val code: Int, message: String) : IOException(message)
@@ -25,17 +26,10 @@ class CodexPhoneApi(
     private val json = Json { ignoreUnknownKeys = true }
 
     suspend fun health(): HostStatus = get("api/health")
-    suspend fun login(username: String, password: String, installationId: String, name: String): AccountLogin = try {
+    suspend fun login(username: String, password: String, installationId: String, name: String): AccountLogin =
         post("v1/login", buildJsonObject {
             put("username", username); put("password", password); put("installationId", installationId); put("name", name); put("kind", "phone")
         }, false)
-    } catch (error: ApiException) {
-        if (error.code == 404) throw IOException(
-            "此地址没有账号登录接口。手机应填写账号服务地址（默认端口 4321）；电脑任务连接端口 4318 不能用于登录。",
-            error,
-        )
-        throw error
-    }
     suspend fun logoutAccount(): JsonObject = post("v1/logout", buildJsonObject {})
     suspend fun connectAccount(accountToken: String): PairResponse = post("api/account/connect", buildJsonObject { put("token", accountToken) }, false)
     suspend fun capabilities(): Capabilities = get("api/capabilities")
@@ -90,10 +84,12 @@ class CodexPhoneApi(
                 runCatching { json.parseToJsonElement(text).jsonObject }.getOrNull()?.let { trySend(it) }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                close(IOException("实时连接中断，请检查 Tailscale 与电脑状态"))
+                val context = RequestContext("GET", "ws", address)
+                close(if (response != null) context.http(response.code, null, false)
+                    else context.network(t as? IOException ?: IOException(t)))
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                close(if (code == 1008) ApiException(401, "设备连接已失效，请重新配对") else null)
+                close(if (code == 1008) ApiException(401, "设备连接已失效，请退出后重新登录") else null)
             }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { webSocket.close(code, reason) }
         })
@@ -108,17 +104,24 @@ class CodexPhoneApi(
         method: String, path: String, body: String? = null, authenticated: Boolean = true,
         query: Map<String, String?> = emptyMap(),
     ): T = withContext(Dispatchers.IO) {
-        val request = Request.Builder().url(url(path, query))
+        val address = url(path, query)
+        val context = RequestContext(method, path, address)
+        val request = Request.Builder().url(address)
             .method(method, body?.toRequestBody(JSON) ?: if (method == "POST" || method == "PUT") ByteArray(0).toRequestBody(null) else null)
             .apply { if (authenticated && token != null) header("Authorization", "Bearer " + token) }.build()
-        client.newCall(request).execute().use { response ->
-            val payload = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                val message = runCatching { json.decodeFromString<ApiError>(payload).error }.getOrNull()
-                throw ApiException(response.code, message ?: "电脑返回错误 (" + response.code + ")")
+        val payload = try {
+            client.newCall(request).execute().use { response ->
+                val content = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    val parsed = runCatching { json.parseToJsonElement(content) as? JsonObject }.getOrNull()
+                    val message = (parsed?.get("error") as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+                    throw context.http(response.code, message, parsed != null)
+                }
+                content
             }
-            runCatching { json.decodeFromString<T>(payload) }.getOrElse { throw IOException("电脑返回的数据格式不正确", it) }
-        }
+        } catch (error: ApiException) { throw error }
+        catch (error: IOException) { throw context.network(error) }
+        runCatching { json.decodeFromString<T>(payload) }.getOrElse { throw context.invalidData(it) }
     }
     private fun url(path: String, query: Map<String, String?> = emptyMap()): HttpUrl =
         (baseUrl.resolve(path) ?: throw IOException("电脑地址无效")).newBuilder().apply {
@@ -126,7 +129,8 @@ class CodexPhoneApi(
         }.build()
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
-        fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+        fun defaultClient(systemProxySelector: ProxySelector? = ProxySelector.getDefault()): OkHttpClient = OkHttpClient.Builder()
+            .proxySelector(PrivateNetworkProxySelector(systemProxySelector))
             .connectTimeout(8, TimeUnit.SECONDS).readTimeout(70, TimeUnit.SECONDS)
             .callTimeout(80, TimeUnit.SECONDS).pingInterval(20, TimeUnit.SECONDS)
             .retryOnConnectionFailure(false).followRedirects(false).followSslRedirects(false).build()
@@ -135,15 +139,8 @@ class CodexPhoneApi(
             val url = value.toHttpUrlOrNull() ?: throw IOException("请输入有效的账号服务地址，例如 http://100.x.x.x:4321")
             if (url.encodedUsername.isNotEmpty() || url.encodedPassword.isNotEmpty() ||
                 url.encodedPath != "/" || url.query != null || url.fragment != null) throw IOException("电脑地址只填写主机和端口")
-            if (url.scheme == "http" && !privateHost(url.host)) throw IOException("HTTP 只允许 Tailscale 或内网电脑地址；公网请使用 HTTPS")
+            if (url.scheme == "http" && !isPrivateHost(url.host)) throw IOException("HTTP 只允许 Tailscale 或内网电脑地址；公网请使用 HTTPS")
             return url
-        }
-        private fun privateHost(host: String): Boolean {
-            if (host == "localhost" || host == "::1" || host.endsWith(".ts.net") || host.endsWith(".local")) return true
-            val ip = host.split('.').mapNotNull { it.toIntOrNull() }
-            if (ip.size != 4 || ip.any { it !in 0..255 }) return host.startsWith("fd7a:115c:a1e0:", ignoreCase = true)
-            return ip[0] == 127 || ip[0] == 10 || (ip[0] == 192 && ip[1] == 168) ||
-                (ip[0] == 172 && ip[1] in 16..31) || (ip[0] == 100 && ip[1] in 64..127)
         }
         fun encode(value: String): String = HttpUrl.Builder().scheme("http").host("localhost").addPathSegment(value).build().encodedPath.drop(1)
     }

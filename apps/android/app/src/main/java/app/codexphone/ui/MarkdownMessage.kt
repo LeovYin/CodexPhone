@@ -3,7 +3,9 @@ package app.codexphone.ui
 import android.content.Intent
 import android.graphics.Color
 import android.net.Uri
+import android.text.method.LinkMovementMethod
 import android.widget.TextView
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -16,6 +18,7 @@ import io.noties.markwon.Markwon
 import io.noties.markwon.MarkwonConfiguration
 import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
 import io.noties.markwon.ext.tables.TablePlugin
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 data class MessageAssets(val markdown: String, val images: List<String>)
 
@@ -49,9 +52,12 @@ fun splitMessageAssets(markdown: String, attachments: List<String>): MessageAsse
             .usePlugin(object : AbstractMarkwonPlugin() {
                 override fun configureConfiguration(builder: MarkwonConfiguration.Builder) {
                     builder.linkResolver { view, link ->
-                        val uri = Uri.parse(link)
-                        if (uri.scheme == "https" || uri.scheme == "http") {
-                            runCatching { view.context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                        when (messageLinkKind(link)) {
+                            MessageLinkKind.WEB -> runCatching {
+                                view.context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link.trim().toHttpUrlOrNull().toString())))
+                            }.onFailure { Toast.makeText(view.context, "未找到可打开网页的浏览器", Toast.LENGTH_SHORT).show() }
+                            MessageLinkKind.FILE -> Toast.makeText(view.context, "这是电脑上的文件链接，暂不支持在手机打开", Toast.LENGTH_SHORT).show()
+                            MessageLinkKind.UNSUPPORTED -> Toast.makeText(view.context, "暂不支持打开此类型的链接", Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -62,12 +68,16 @@ fun splitMessageAssets(markdown: String, attachments: List<String>): MessageAsse
             modifier = Modifier.fillMaxWidth(),
             factory = { ctx -> TextView(ctx).apply {
                 textSize = 15f; setTextColor(Color.rgb(23, 34, 59))
+                setLinkTextColor(Color.rgb(49, 95, 202)); linksClickable = true
                 setTextIsSelectable(true); setLineSpacing(3f, 1.1f)
+                setOnTouchListener(MessageLinkTouchListener())
                 setPadding(0, 0, 0, 0)
             } },
             update = { view ->
                 if (view.tag != assets.markdown) {
-                    markwon.setMarkdown(view, assets.markdown); view.tag = assets.markdown
+                    markwon.setParsedMarkdown(view, markwon.render(prepareMessageLinks(markwon.parse(assets.markdown))))
+                    view.movementMethod = LinkMovementMethod.getInstance()
+                    view.tag = assets.markdown
                 }
             },
         )

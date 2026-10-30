@@ -5,6 +5,28 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { AccountDatabase } from "../apps/host/dist/accounts-db.js";
 import { DeviceStore } from "../apps/host/dist/store.js";
+import { createServer } from "node:http";
+import { accountRequest } from "../apps/host/dist/account-client.js";
+
+test("account client explains HTML gateway errors and malformed successes without exposing responses or tokens", async () => {
+  let status = 502, body = "<html>private-response-marker</html>";
+  const server = createServer((req, res) => { req.resume(); res.writeHead(status); res.end(body); });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await assert.rejects(accountRequest(origin, "/v1/hosts/fixture/authorize", { token: "private-token-marker" }), e => {
+      assert.equal(e.statusCode, 502); assert.match(e.message, /核验设备授权.*HTTP 502/);
+      assert.match(e.message, /非 JSON/); assert.ok(e.message.includes(origin));
+      assert.doesNotMatch(e.message, /private-response-marker|private-token-marker/); return true;
+    });
+    status = 200;
+    await assert.rejects(accountRequest(origin, "/v1/login", {}), e => { assert.equal(e.statusCode, 502); assert.match(e.message, /登录账号服务.*HTTP 200/); return true; });
+    status = 401; body = JSON.stringify({ error: "账号或密码不正确" });
+    await assert.rejects(accountRequest(origin, "/v1/login", {}), e => { assert.equal(e.statusCode, 401); assert.match(e.message, /账号或密码不正确/); return true; });
+    status = 200; body = JSON.stringify({ token: "fixture-result" });
+    assert.deepEqual(await accountRequest(origin, "/v1/login", {}), { token: "fixture-result" });
+  } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+});
 
 test("SQLite accounts isolate hosts, persist login and never store plaintext passwords or tokens", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "phone-accounts-")); let db;

@@ -19,12 +19,27 @@ export function serviceUrl(value: unknown): string {
   return url.origin;
 }
 export async function accountRequest<T>(base: string, endpoint: string, body: unknown, token?: string): Promise<T> {
-  let response: Response;
-  try { response = await fetch(serviceUrl(base) + endpoint, { method: "POST", redirect: "error", signal: AbortSignal.timeout(8000),
-    headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) }, body: JSON.stringify(body) }); }
-  catch { throw new HttpError(503, "账号服务暂时无法连接，请检查账号服务与 Tailscale"); }
-  const result = await response.json() as T & { error?: string };
-  if (!response.ok) throw new HttpError(response.status, result.error || "账号服务未完成请求"); return result;
+  const origin = serviceUrl(base);
+  const stage = endpoint === "/v1/login" ? "登录账号服务" : endpoint.endsWith("/authorize") ? "电脑向账号服务核验设备授权" : "访问账号服务";
+  let response: Response, text: string;
+  try {
+    response = await fetch(origin + endpoint, { method: "POST", redirect: "error", signal: AbortSignal.timeout(8000),
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) }, body: JSON.stringify(body) });
+    text = await response.text();
+  } catch { throw new HttpError(503, `${stage}失败：无法连接 ${origin} 或响应超时。请检查电脑上的账号服务、Tailscale 和端口。`); }
+  let result: T & { error?: unknown };
+  try {
+    result = JSON.parse(text) as typeof result;
+    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Invalid account response");
+  } catch {
+    const code = response.ok ? 502 : response.status;
+    throw new HttpError(code, `${stage}失败（HTTP ${response.status}）：${origin} 返回非 JSON 数据，可能来自错误端口、代理或反向代理。请检查账号服务地址；网关响应不代表 Codex 任务本身失败。`);
+  }
+  if (!response.ok) {
+    const detail = typeof result.error === "string" && result.error.trim() ? result.error.slice(0, 500) : "账号服务未完成请求";
+    throw new HttpError(response.status, `${stage}失败（HTTP ${response.status}，${origin}）：${detail}`);
+  }
+  return result;
 }
 export async function authorizeAccount(directory: string, input: { token?: string; sessionId?: string }): Promise<AccountIdentity> {
   const configured = await binding(directory); if (!configured) throw new HttpError(409, "请先在电脑管理中心登录并绑定账号");

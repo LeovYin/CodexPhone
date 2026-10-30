@@ -45,6 +45,7 @@ class PhoneFlowTest {
     @Volatile private var operationQueries = 0
     @Volatile private var longHistory = false
     @Volatile private var questionMode = false
+    @Volatile private var loginGatewayFailure = false
     private val answers = CopyOnWriteArrayList<JsonObject>()
     private val questionRequest = """{"id":"approval","threadId":"shared","turnId":"turn","kind":"question","title":"Codex 需要你的回答","detail":"","canAccept":true,"questions":[{"id":"platform","question":"选择客户端","secret":false,"options":[{"label":"原生安卓","description":"Kotlin"},{"label":"网页","description":"浏览器"}]},{"id":"notes","question":"补充要求","secret":false,"options":[]}]}"""
     private val request = """{"id":"approval","threadId":"shared","turnId":"turn","kind":"command","title":"允许执行测试命令？","detail":"echo fixture","canAccept":true,"questions":[]}"""
@@ -57,6 +58,8 @@ class PhoneFlowTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(r: RecordedRequest): MockResponse {
                 val path = r.path.orEmpty().substringBefore('?')
+                if (path == "/v1/login" && loginGatewayFailure) return MockResponse().setResponseCode(502)
+                    .setHeader("Content-Type", "text/html").setBody("<html>fixture upstream unavailable</html>")
                 if (path == "/ws") return MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                     override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
                         sockets.add(webSocket); webSocket.send("""{"type":"connected","deviceId":"device"}""")
@@ -144,6 +147,23 @@ class PhoneFlowTest {
         compose.waitUntil(5000) { !vm.state.value.paired }
         compose.onNodeWithText("账号服务地址").assertExists()
         screenshot("login-page-test.png")
+    }
+    @Test fun login502ShowsAccountStageAndDiagnosticsWithoutCrashing() {
+        connected()
+        compose.runOnIdle {
+            vm.forgetLocally()
+            vm.editAccounts(server.url("/").newBuilder().host("127.0.0.1").build().toString())
+            loginGatewayFailure = true
+            vm.login("fixture-account", "fixture-password")
+        }
+        compose.waitUntil(15000) { vm.state.value.error != null && !vm.state.value.busy }
+        Assert.assertFalse(vm.state.value.paired)
+        Assert.assertTrue(vm.state.value.error.orEmpty().contains("登录账号服务"))
+        Assert.assertTrue(vm.state.value.error.orEmpty().contains("HTTP 502"))
+        compose.onNodeWithText("操作未完成").assertIsDisplayed()
+        compose.onNodeWithText("查看诊断").performClick()
+        compose.onNodeWithText("POST /v1/login", substring = true).assertExists()
+        screenshot("login-error-036-test.png")
     }
     @After fun cleanup() {
         vm.setForeground(false)

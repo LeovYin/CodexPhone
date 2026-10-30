@@ -14,6 +14,7 @@ import java.util.UUID
 data class PhoneUiState(
     val hostUrl: String = "", val paired: Boolean = false, val busy: Boolean = false, val sending: Boolean = false,
     val error: String? = null, val notice: String? = null, val hostStatus: HostStatus? = null,
+    val connectionStep: String? = null,
     val projects: List<Project> = emptyList(), val threads: List<ThreadSummary> = emptyList(),
     val selectedProjectId: String? = null, val selectedThread: ThreadDetail? = null,
     val selectedThreadId: String? = null, val composingNew: Boolean = false,
@@ -49,16 +50,24 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
     fun login(username: String, password: String) {
         if (_state.value.busy) return
         work {
+            _state.update { it.copy(connectionStep = "正在登录账号服务…") }
             val accounts = CodexPhoneApi(_state.value.accountsUrl)
             val login = accounts.login(username.trim(), password, credentials.installationId, (android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL).take(60))
-            val host = login.host ?: error("账号尚未绑定电脑，请先在电脑管理中心完成绑定")
-            val computer = CodexPhoneApi(host.url); val session = computer.connectAccount(login.token)
+            val host = login.host ?: throw java.io.IOException("账号已登录，但尚未绑定电脑。请先在电脑管理中心完成绑定。")
+            val computer = CodexPhoneApi(host.url)
+            if (computer.baseUrl.host in listOf("0.0.0.0", "::") ||
+                (computer.baseUrl.host in listOf("localhost", "127.0.0.1", "::1") &&
+                    accounts.baseUrl.host !in listOf("localhost", "127.0.0.1", "::1"))) {
+                throw java.io.IOException("账号已登录，但登记的电脑地址仅供本机使用：${computer.baseUrl}。请在电脑管理中心改为手机可访问的 Tailscale 地址，并重新绑定。")
+            }
+            _state.update { it.copy(connectionStep = "账号已登录，正在连接绑定的电脑…") }
+            val session = computer.connectAccount(login.token)
             withContext(Dispatchers.IO) {
                 credentials.saveSession(computer.baseUrl.toString(), session.token, session.deviceId)
                 credentials.saveAccount(accounts.baseUrl.toString(), login.account.username, login.token)
             }
             api = CodexPhoneApi(computer.baseUrl.toString(), session.token)
-            _state.update { it.copy(paired = true, hostUrl = computer.baseUrl.toString(), accountsUrl = accounts.baseUrl.toString().trimEnd('/'), username = login.account.username, rememberedServers = credentials.rememberedServers()) }
+            _state.update { it.copy(paired = true, connectionStep = "正在加载电脑任务…", hostUrl = computer.baseUrl.toString(), accountsUrl = accounts.baseUrl.toString().trimEnd('/'), username = login.account.username, rememberedServers = credentials.rememberedServers()) }
             try { refreshNow() } finally { startRealtime() }
         }
     }
@@ -125,7 +134,7 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
                 catch (e: Exception) {
                     _state.update { it.copy(realtime = false) }
                     if (e is ApiException && e.code == 401) {
-                        _state.update { it.copy(error = "配对已失效，请在设置中移除此连接后重新配对") }; break
+                        _state.update { it.copy(error = "设备授权已失效，请退出后重新登录。\n${e.message.orEmpty()}") }; break
                     }
                 }
                 _state.update { it.copy(realtime = false) }; delay(wait); wait = (wait * 2).coerceAtMost(15_000)
@@ -293,8 +302,9 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         val session = epoch
         try { completeSubmission(pending, connection().submit(pending)) }
         catch (e: CancellationException) { throw e }
-        catch (_: Exception) {
-            _state.update { it.copy(error = "提交结果尚未确认。请查询状态或查看对话；不要另发相同内容。", pendingStatus = "unknown") }
+        catch (e: Exception) {
+            val diagnostic = if (e is java.io.IOException) "\n${e.message.orEmpty()}" else ""
+            _state.update { it.copy(error = "提交结果尚未确认。请查询状态或查看对话；不要另发相同内容。$diagnostic", pendingStatus = "unknown") }
             runCatching { reconcilePending() }
         } finally { if (session == epoch) _state.update { it.copy(sending = false) } }
     }
@@ -394,7 +404,7 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try { block() } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (session == epoch) failure(e) }
-            finally { if (session == epoch) _state.update { it.copy(busy = false, sending = if (showBusy) it.sending else false) } }
+            finally { if (session == epoch) _state.update { it.copy(busy = false, connectionStep = null, sending = if (showBusy) it.sending else false) } }
         }
     }
     private fun failure(e: Exception) { _state.update { it.copy(error = if (e is ApiException) e.message else
