@@ -22,6 +22,7 @@ data class PhoneUiState(
     val approvals: List<ApprovalRequest> = emptyList(), val pending: PendingSubmission? = null,
     val pendingStatus: String? = null, val supportsSafeSend: Boolean = false, val realtime: Boolean = false,
     val hostVersion: String? = null,
+    val supportsQueue: Boolean = false, val queued: List<QueuedMessage> = emptyList(),
 )
 
 class PhoneViewModel(application: Application) : AndroidViewModel(application) {
@@ -126,6 +127,8 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         val page = api.threads(before.selectedProjectId, search = before.query)
         val approvals = if (capabilities?.capabilities?.contains("global-approvals") == true) api.approvals() else emptyList()
         val detail = before.selectedThreadId?.let { api.thread(it) }
+        val supportsQueue = capabilities?.capabilities?.contains("message-queue") == true
+        val queued = if (supportsQueue && before.selectedThreadId != null) api.queue(before.selectedThreadId) else emptyList()
         if (session != epoch) return@withLock
         _state.update { current ->
             val sameFilter = current.selectedProjectId == before.selectedProjectId && current.query == before.query
@@ -140,7 +143,8 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
                 selectedThread = if (current.selectedThreadId == before.selectedThreadId && detail != null)
                     mergeHistory(current.selectedThread, detail, detail.thread.id in extendedHistory) else current.selectedThread,
                 approvals = approvals, supportsSafeSend = capabilities?.capabilities?.contains("idempotent-send") == true,
-                hostVersion = capabilities?.hostVersion, error = null)
+                hostVersion = capabilities?.hostVersion, supportsQueue = supportsQueue,
+                queued = if (current.selectedThreadId == before.selectedThreadId) queued else current.queued, error = null)
         }
         local.cache(_state.value.threads, _state.value.selectedThread)
         withContext(Dispatchers.IO) { local.persist() }
@@ -171,12 +175,16 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         persistDraft()
         extendedHistory.remove(id)
         _state.update { it.copy(selectedThreadId = id, composingNew = false, selectedThread = local.data.details.find { d -> d.thread.id == id },
-            draft = local.draft(id), error = null, model = null, effort = null) }
+            draft = local.draft(id), error = null, model = null, effort = null, queued = emptyList()) }
         work {
             val session = epoch; val detail = connection().thread(id)
             if (session == epoch && _state.value.selectedThreadId == id) {
                 _state.update { it.copy(selectedThread = detail, model = detail.model, effort = detail.effort) }
                 local.cache(_state.value.threads, detail); saveLocal()
+                if (_state.value.supportsQueue) {
+                    val messages = connection().queue(id)
+                    if (session == epoch && _state.value.selectedThreadId == id) _state.update { it.copy(queued = messages) }
+                }
             }
         }
     }
@@ -188,7 +196,7 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
                 extendedHistory.add(snapshot.thread.id)
                 _state.update {
                 val current = it.selectedThread ?: return@update it
-                it.copy(selectedThread = current.copy(turns = (more.turns + current.turns).distinctBy(ThreadTurn::id).sortedBy { turn -> turn.startedAt ?: 0 }, nextCursor = more.nextCursor))
+                it.copy(selectedThread = current.copy(turns = (more.turns + current.turns).distinctBy(ThreadTurn::id), nextCursor = more.nextCursor))
                 }
             }
         }
@@ -215,20 +223,33 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(model = id, effort = option?.defaultEffort?.takeIf(String::isNotBlank)) }
     }
     fun chooseEffort(effort: String) { _state.update { it.copy(effort = effort) } }
-    fun send(steer: Boolean = false) {
+    fun send() {
         val s = _state.value
         if (s.sending || s.pending != null || s.draft.isBlank() || !s.supportsSafeSend) return
+        val shouldQueue = s.selectedThread?.thread?.activeTurnId != null
+        if (shouldQueue && !s.supportsQueue) { _state.update { it.copy(error = "请升级电脑 Host 至 0.2.1 后使用排队发送") }; return }
         if (s.composingNew && s.projects.none { it.id == s.selectedProjectId && it.canStart }) {
             _state.update { it.copy(error = "请先在电脑端登记允许启动任务的项目") }; return
         }
         val pending = PendingSubmission(UUID.randomUUID().toString(), s.selectedThreadId, if (s.composingNew) s.selectedProjectId else null,
-            s.draft.trim(), s.model, s.effort, if (steer) "steer" else "send")
+            s.draft.trim(), s.model, s.effort, if (shouldQueue) "queue" else "send")
         _state.update { it.copy(sending = true, error = null) }
         work(false) {
             withContext(Dispatchers.IO) { local.pending(pending) }
             _state.update { it.copy(pending = pending, pendingStatus = "running") }; dispatch(pending)
         }
     }
+    fun guideQueued(message: QueuedMessage) {
+        val s = _state.value
+        if (s.sending || s.pending != null || message.state != "queued") return
+        val pending = PendingSubmission(UUID.randomUUID().toString(), message.threadId, null, message.prompt, null, null, "guide:" + message.id)
+        _state.update { it.copy(sending = true, error = null) }
+        work(false) {
+            withContext(Dispatchers.IO) { local.pending(pending) }
+            _state.update { it.copy(pending = pending, pendingStatus = "running") }; dispatch(pending)
+        }
+    }
+    fun cancelQueued(message: QueuedMessage) = work { connection().cancelQueued(message.threadId, message.id); refreshNow() }
     fun retryPending() {
         val pending = _state.value.pending ?: return
         if (_state.value.sending) return
@@ -265,14 +286,15 @@ class PhoneViewModel(application: Application) : AndroidViewModel(application) {
         if (_state.value.pending?.requestId != pending.requestId) return
         val id = result["threadId"]?.jsonPrimitive?.contentOrNull ?: pending.threadId
         val key = pending.threadId ?: "new"
-        if (local.draft(key).trim() == pending.prompt) local.draft(key, "")
+        val clearDraft = !pending.kind.startsWith("guide:")
+        if (clearDraft && local.draft(key).trim() == pending.prompt) local.draft(key, "")
         withContext(Dispatchers.IO) { local.pending(null) }
         _state.update {
             val same = it.selectedThreadId == pending.threadId && (pending.threadId != null || it.composingNew)
             it.copy(pending = null, pendingStatus = null, error = null, notice = "电脑已接收",
                 selectedThreadId = if (same) id else it.selectedThreadId,
                 composingNew = if (same && id != null) false else it.composingNew,
-                draft = if (same && it.draft.trim() == pending.prompt) "" else it.draft)
+                draft = if (clearDraft && same && it.draft.trim() == pending.prompt) "" else it.draft)
         }; scheduleSync()
     }
     fun dismissPendingAfterReview() {

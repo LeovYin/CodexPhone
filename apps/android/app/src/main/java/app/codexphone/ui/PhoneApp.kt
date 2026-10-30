@@ -39,6 +39,7 @@ import coil.compose.SubcomposeAsyncImage
 import coil.decode.SvgDecoder
 import coil.request.ImageRequest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 
 private val Ink = Color(0xFF17223B)
 private val Muted = Color(0xFF65718A)
@@ -210,6 +211,11 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
 @Composable private fun ConversationScreen(s: PhoneUiState, vm: PhoneViewModel) {
     var modelSheet by remember { mutableStateOf(false) }
     var confirmStop by remember { mutableStateOf(false) }
+    var navigation by remember { mutableStateOf(false) }
+    var reviewedQueue by remember { mutableStateOf<QueuedMessage?>(null) }
+    var initiallyPositioned by remember(s.selectedThreadId) { mutableStateOf(false) }
+    var followLatest by remember(s.selectedThreadId) { mutableStateOf(true) }
+    var positioning by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val atBottom by remember { derivedStateOf {
@@ -219,8 +225,22 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
     val items = messages.map { it.second }
     val title = if (s.composingNew) "新建任务" else s.selectedThread?.thread?.name?.takeIf(String::isNotBlank) ?: "对话"
     val running = s.selectedThread?.thread?.activeTurnId != null
+    LaunchedEffect(listState, s.selectedThreadId) {
+        snapshotFlow { listState.isScrollInProgress to atBottom }.collect { (scrolling, bottom) ->
+            if (scrolling && !positioning) followLatest = bottom
+        }
+    }
     LaunchedEffect(s.selectedThreadId, items.lastOrNull()?.text?.length, items.size) {
-        if (atBottom && items.isNotEmpty()) listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
+        if ((!initiallyPositioned || followLatest) && items.isNotEmpty()) {
+            val expectedCount = messages.size + 1 + (if (s.selectedThread?.nextCursor != null) 1 else 0) +
+                s.approvals.count { it.threadId == s.selectedThreadId }
+            // Wait for the new snapshot's layout, rather than scrolling the old
+            // loading placeholder and considering the conversation positioned.
+            snapshotFlow { listState.layoutInfo.totalItemsCount }.first { it >= expectedCount }
+            positioning = true
+            try { listState.scrollToItem(expectedCount - 1) } finally { positioning = false }
+            initiallyPositioned = true
+        }
     }
     Scaffold(containerColor = Background, contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
@@ -232,6 +252,7 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
                         Text(if (s.realtime) "与电脑实时同步" else "正在恢复连接", color = Muted, fontSize = 11.sp)
                     }
                     if (running) IconButton({ confirmStop = true }, enabled = !s.busy) { Icon(Icons.Default.StopCircle, "中断任务", tint = Color(0xFFB3433B)) }
+                    IconButton({ navigation = true }) { Icon(Icons.Default.SwapVert, "对话导航") }
                     IconButton(vm::refresh, enabled = !s.busy) { Icon(Icons.Default.Refresh, "刷新对话") }
                 }
             }
@@ -239,6 +260,20 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
         bottomBar = {
             Surface(color = Color.White, shadowElevation = 3.dp) {
                 Column(Modifier.navigationBarsPadding().imePadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    if (s.queued.any { it.threadId == s.selectedThreadId }) Column(Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())) {
+                        s.queued.filter { it.threadId == s.selectedThreadId }.forEach { message ->
+                            Surface(color = Color(0xFFE8EEFC), shape = RoundedCornerShape(12.dp), modifier = Modifier.padding(bottom = 6.dp)) {
+                                Row(Modifier.fillMaxWidth().padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(if (message.state == "queued") "排队中 · 本轮结束后发送" else if (message.state == "dispatching") "正在提交" else "结果待确认 · 请检查对话", fontSize = 11.sp, color = Muted)
+                                        Text(message.prompt, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 13.sp, color = Ink)
+                                    }
+                                    TextButton({ vm.guideQueued(message) }, enabled = running && message.state == "queued" && !s.sending && s.pending == null) { Text("引导") }
+                                    IconButton({ if (message.state == "unknown") reviewedQueue = message else vm.cancelQueued(message) }, enabled = message.state != "dispatching" && !s.busy) { Icon(Icons.Default.Close, "移除排队消息", Modifier.size(18.dp)) }
+                                }
+                            }
+                        }
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton({ modelSheet = true }, contentPadding = PaddingValues(horizontal = 6.dp)) {
                             Text((s.model ?: "默认模型").substringAfterLast('/'), maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -246,18 +281,18 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
                         }
                         Text(s.effort ?: "", fontSize = 12.sp, color = Muted)
                         Spacer(Modifier.weight(1f))
-                        if (running) Text("运行中 · 可追加指令", color = Color(0xFF176B62), fontSize = 12.sp)
+                        if (running) Text("运行中 · 发送后排队", color = Color(0xFF176B62), fontSize = 12.sp)
                     }
                     Row(verticalAlignment = Alignment.Bottom) {
                         OutlinedTextField(s.draft, vm::editDraft, Modifier.weight(1f).heightIn(min = 50.dp, max = 180.dp),
-                            placeholder = { Text(if (running) "补充本轮任务的指令…" else "输入消息，回车换行…") },
+                            placeholder = { Text(if (running) "发送后排队，可点击引导干预…" else "输入消息，回车换行…") },
                             maxLines = 6, shape = RoundedCornerShape(16.dp),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default, capitalization = KeyboardCapitalization.Sentences))
                         Spacer(Modifier.width(8.dp))
-                        FilledIconButton({ vm.send(running) }, Modifier.size(48.dp),
+                        FilledIconButton({ vm.send() }, Modifier.size(48.dp),
                             enabled = s.draft.isNotBlank() && s.pending == null && !s.sending && s.supportsSafeSend && s.hostStatus?.status == "ready") {
                             if (s.sending) CircularProgressIndicator(Modifier.size(21.dp), color = Color.White, strokeWidth = 2.dp)
-                            else Icon(Icons.AutoMirrored.Filled.Send, if (running) "追加指令" else "发送消息")
+                            else Icon(Icons.AutoMirrored.Filled.Send, if (running) "排队发送" else "发送消息")
                         }
                     }
                 }
@@ -288,12 +323,33 @@ fun CodexPhoneApp(vm: PhoneViewModel) {
                     item { Spacer(Modifier.height(2.dp)) }
                 }
                 if (!atBottom && items.isNotEmpty()) SmallFloatingActionButton(
-                    { scope.launch { listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)) } },
+                    { scope.launch { listState.animateScrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)); followLatest = true } },
                     Modifier.align(Alignment.BottomEnd).padding(12.dp), containerColor = Color.White,
                 ) { Icon(Icons.Default.KeyboardArrowDown, "回到最新消息") }
             }
         }
     }
+    if (navigation) ModalBottomSheet(onDismissRequest = { navigation = false }) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 24.dp)) {
+            Text("对话导航", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            TextButton({ navigation = false; scope.launch { listState.scrollToItem((listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)); followLatest = true } }) { Text("跳到最新消息") }
+            if (s.selectedThread?.nextCursor != null) TextButton({ vm.loadEarlier() }, enabled = !s.busy) { Text("加载更早消息") }
+            LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                itemsIndexed(s.selectedThread?.turns.orEmpty(), key = { _, turn -> turn.id }) { index, turn ->
+                    Column(Modifier.fillMaxWidth().clickable {
+                        navigation = false
+                        followLatest = false
+                        val position = messages.indexOfFirst { it.first.startsWith(turn.id + ":") }
+                        if (position >= 0) scope.launch { listState.scrollToItem(position + if (s.selectedThread?.nextCursor != null) 1 else 0) }
+                    }.padding(vertical = 12.dp)) {
+                        Text("第 ${index + 1} 轮", fontWeight = FontWeight.SemiBold, color = Ink)
+                        Text(turn.items.firstOrNull { it.type == "userMessage" }?.text ?: turn.items.firstOrNull()?.text ?: "任务消息", maxLines = 2, overflow = TextOverflow.Ellipsis, color = Muted, fontSize = 13.sp)
+                    }
+                }
+            }
+        }
+    }
+    reviewedQueue?.let { message -> AlertDialog(onDismissRequest = { reviewedQueue = null }, title = { Text("已检查电脑端对话？") }, text = { Text("移除记录不会取消可能已经执行的消息。确认结果后再继续排队。") }, confirmButton = { TextButton({ reviewedQueue = null; vm.cancelQueued(message) }) { Text("已检查，移除记录") } }, dismissButton = { TextButton({ reviewedQueue = null }) { Text("取消") } }) }
     if (modelSheet) ModalBottomSheet(onDismissRequest = { modelSheet = false }) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
             Text("模型与推理强度", fontSize = 20.sp, fontWeight = FontWeight.Bold)

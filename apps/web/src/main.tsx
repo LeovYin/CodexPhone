@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Activity, ArrowLeft, ArrowUp, CircleAlert, Code2, FolderGit2, LoaderCircle, LogOut, MessageSquareText, Pin, Plus, RefreshCw, Smartphone, Square, Wifi, WifiOff, X } from "lucide-react";
 import type { ApprovalRequest, HostStatus, ModelOption, Project, ThreadDetail, ThreadSummary } from "@codexphone/shared";
-import { api, clearToken, connectEvents, getToken, setToken } from "./api";
+import { api, clearToken, connectEvents, getToken, setToken, type QueuedMessage } from "./api";
 import { MessageContent } from "./MessageContent";
 import { ProjectManager } from "./ProjectManager";
 import { appendDelta, type LiveMessage } from "./live";
@@ -62,6 +62,9 @@ function App() {
   const sending = useRef(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const followBottom = useRef(true);
+  const extendedHistory = useRef(false);
+  const [queued, setQueued] = useState<QueuedMessage[]>([]);
+  const [navigation, setNavigation] = useState(false);
   const draftKey = selectedId || "new";
   const composer = typeof drafts[draftKey] === "string" ? drafts[draftKey] : "";
   const setComposer = (value: string) => setDrafts((current) => ({ ...current, [draftKey]: value }));
@@ -107,21 +110,23 @@ function App() {
 
   const loadThread = useCallback(async (id: string, background = false) => {
     if (!background) {
-      selectedRef.current = id; setSelectedId(id); setDetail(null); setError(null); followBottom.current = true;
+      selectedRef.current = id; setSelectedId(id); setDetail(null); setQueued([]); setNavigation(false); setError(null); followBottom.current = true; extendedHistory.current = false;
     }
     const request = ++threadRequest.current;
     try {
       const result = await api.thread(id);
       if (selectedRef.current === id && request === threadRequest.current) {
-        setDetail((current) => current?.thread.id === id && current.turns.length > result.turns.length ? {
+        setDetail((current) => current?.thread.id === id && extendedHistory.current ? {
           ...result, nextCursor: current.nextCursor,
-          turns: [...result.turns, ...current.turns.filter((turn) => !result.turns.some((entry) => entry.id === turn.id))].sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0)),
+          turns: [...current.turns.filter((turn) => !result.turns.some((entry) => entry.id === turn.id)), ...result.turns],
         } : result);
         setLiveMessages((current) => current.filter((message) => {
           if (message.threadId !== id) return false;
           const turn = result.turns.find((entry) => entry.id === message.turnId);
           return !turn || turn.status === "inProgress";
         }));
+        // Older hosts can still display conversations; never fall back to implicit steer.
+        void api.queue(id).then(result => { if (selectedRef.current === id) setQueued(result.messages); }).catch(() => {});
       }
     } catch (caught) { if (selectedRef.current === id && request === threadRequest.current) setError(errorMessage(caught)); }
   }, []);
@@ -155,9 +160,15 @@ function App() {
     setEffort(value); localStorage.setItem(`codexphone-selection:${draftKey}`, JSON.stringify({ model, effort: value }));
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (followBottom.current && contentRef.current) contentRef.current.scrollTop = contentRef.current.scrollHeight;
   }, [detail, selectedId, busy, liveMessages]);
+  useEffect(() => {
+    const element = contentRef.current, stack = element?.firstElementChild;
+    if (!element || !stack) return;
+    const observer = new ResizeObserver(() => { if (followBottom.current) element.scrollTop = element.scrollHeight; });
+    observer.observe(stack); return () => observer.disconnect();
+  }, [selectedId, !!detail]);
 
   useEffect(() => {
     if (!token) return;
@@ -181,7 +192,7 @@ function App() {
           });
           if (event.type === "connected") { setConnected(true); scheduleUpdate(); }
           if (event.type === "host-status") void api.health().then(setHostStatus).catch(() => {});
-          if (event.type === "agent-delta" || event.type === "item-status" || event.type === "turn-status" || event.type === "refresh-thread" || event.type === "approval-requested" || event.type === "approval-resolved" || event.type === "host-status") scheduleUpdate();
+          if (event.type === "queue-updated" || event.type === "agent-delta" || event.type === "item-status" || event.type === "turn-status" || event.type === "refresh-thread" || event.type === "approval-requested" || event.type === "approval-resolved" || event.type === "host-status") scheduleUpdate();
         }, () => {
           setConnected(false);
           if (!closed) { reconnectTimer = window.setTimeout(connect, retryDelay); retryDelay = Math.min(retryDelay * 2, 15_000); }
@@ -216,7 +227,8 @@ function App() {
     try {
       const page = await api.thread(id, detail.nextCursor);
       if (selectedRef.current !== id) return;
-      setDetail((current) => current?.thread.id === id ? { ...current, nextCursor: page.nextCursor, turns: [...page.turns.filter((turn) => !current.turns.some((entry) => entry.id === turn.id)), ...current.turns].sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0)) } : current);
+      extendedHistory.current = true;
+        setDetail((current) => current?.thread.id === id ? { ...current, nextCursor: page.nextCursor, turns: [...page.turns.filter((turn) => !current.turns.some((entry) => entry.id === turn.id)), ...current.turns] } : current);
       requestAnimationFrame(() => { if (element && selectedRef.current === id) element.scrollTop = element.scrollHeight - distanceFromBottom; });
     } catch (caught) { setError(errorMessage(caught)); } finally { setLoadingOlder(false); }
   };
@@ -253,7 +265,7 @@ function App() {
         await refresh();
         await loadThread(result.threadId);
       } else if (selectedId) {
-        if (detail?.thread.activeTurnId) await api.steer(selectedId, prompt);
+        if (detail?.thread.activeTurnId || api.hasPendingEnqueue(selectedId)) await api.enqueue(selectedId, prompt, selection);
         else await api.send(selectedId, prompt, selection);
         clearSubmitted();
         await loadThread(selectedId, true);
@@ -387,7 +399,7 @@ function App() {
             const live = liveMessages.find((entry) => entry.threadId === selectedId && entry.turnId === turn.id && entry.itemId === item.id);
             const text = (live && live.text.length > item.text.length ? live.text : item.text).trim();
             if (!text && !item.images?.length) return null;
-            return <article className={`message ${isUser ? "message-user" : "message-agent"}`} key={`${turn.id}-${item.id || index}`}>
+            return <article data-turn-id={turn.id} className={`message ${isUser ? "message-user" : "message-agent"}`} key={`${turn.id}-${item.id || index}`}>
               <div className="message-label">{isUser ? "你" : "Codex"}<span>{turn.startedAt ? relativeTime(new Date(turn.startedAt).toISOString()) : ""}</span></div>
               {isUser ? <div className="message-body user-text">{text}<MessageContent text="" images={item.images} threadId={selectedId!} /></div> : <MessageContent text={text} images={item.images} threadId={selectedId!} />}
             </article>;
@@ -399,15 +411,18 @@ function App() {
         </div>}
         {error && <div className="inline-error"><CircleAlert size={15} />{error}<button className="icon-button" onClick={() => setError(null)} aria-label="关闭错误"><X size={15} /></button></div>}
       </div>
+      {selectedId && detail && <div className="conversation-nav"><button type="button" onClick={() => setNavigation(!navigation)}>对话导航</button>{navigation && <div role="dialog" aria-label="对话导航" className="navigation-panel"><button onClick={() => { followBottom.current = true; if (contentRef.current) contentRef.current.scrollTop = contentRef.current.scrollHeight; setNavigation(false); }}>跳到最新消息</button>{detail.nextCursor && <button disabled={loadingOlder} onClick={() => void loadOlderMessages()}>加载更早消息</button>}{detail.turns.map((turn, index) => <button key={turn.id} onClick={() => { followBottom.current = false; contentRef.current?.querySelector(`[data-turn-id="${CSS.escape(turn.id)}"]`)?.scrollIntoView({ block: "start" }); setNavigation(false); }}><strong>第 {index + 1} 轮</strong><span>{(turn.items.find(i => i.type === "userMessage")?.text || turn.items[0]?.text || "任务消息").slice(0, 80)}</span></button>)}</div>}</div>}
       {(selectedId || newTask) && <form className="composer" onSubmit={submit}>
+          {selectedId && api.hasPendingQueueRequest(selectedId) && !busy && <p className="model-note">有排队或引导提交待确认。保留原内容重试会先查询状态。<button type="button" onClick={() => { if (confirm("请先核对电脑对话及排队条。清除后再次发送可能重复执行；此操作不会取消电脑任务。确认已检查？")) { api.discardQueueRequests(selectedId); setError(null); void loadThread(selectedId, true); } }}>已检查，清除提交记录</button></p>}
+        {queued.length > 0 && <div className="queued-messages" aria-label="排队消息">{queued.map(message => <div className="queued-message" key={message.id}><div><small>{message.state === "queued" ? "排队中 · 本轮结束后发送" : message.state === "dispatching" ? "正在提交" : "结果待确认 · 请先检查对话"}</small><p>{message.prompt}</p>{message.error && <small>{message.error}</small>}</div><div className="queue-actions"><button type="button" disabled={busy || !running || message.state !== "queued"} onClick={() => { if (selectedId) { setBusy(true); void api.guideQueued(selectedId, message.id).then(() => loadThread(selectedId, true)).catch(e => setError(errorMessage(e))).finally(() => setBusy(false)); } }}>引导</button><button type="button" disabled={busy || message.state === "dispatching"} onClick={() => { if (selectedId && (message.state !== "unknown" || confirm("请确认已检查对话。移除记录不会取消已执行的任务。"))) void api.cancelQueued(selectedId, message.id).then(() => loadThread(selectedId, true)).catch(e => setError(errorMessage(e))); }}>{message.state === "unknown" ? "已检查，移除" : "移除"}</button></div></div>)}</div>}
         <div className="model-controls">
           <label>模型<select aria-label="选择模型" value={model} onChange={(event) => chooseModel(event.target.value)} disabled={busy || running || !modelOptions.length}>{!modelOptions.length && <option value="">使用电脑配置</option>}{modelOptions.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label>
           <label>思考强度<select aria-label="选择思考强度" value={effort} onChange={(event) => chooseEffort(event.target.value)} disabled={busy || running || !selectedModel?.efforts.length}>{!selectedModel && <option value="">默认</option>}{selectedModel?.efforts.map((value) => <option key={value} value={value}>{({ low: "低", medium: "中", high: "高", xhigh: "更高", max: "最高", ultra: "极高", minimal: "最小", none: "无" } as Record<string, string>)[value] || value} ({value})</option>)}</select></label>
         </div>
         {modelError && <p className="model-note">模型列表暂不可用，将使用电脑配置。</p>}
-        {running && <p className="model-note">运行中发送会追加指导；所选模型在下一轮生效。</p>}
+        {running && <p className="model-note">发送后默认排队；点击排队条右侧“引导”可干预当前任务。</p>}
         <textarea aria-label="消息" value={composer} onChange={(event) => { setComposer(event.target.value); event.target.style.height = "auto"; event.target.style.height = `${Math.min(event.target.scrollHeight, 160)}px`; }} placeholder={newTask ? "想让 Codex 做什么？" : "继续对话…"} rows={2} maxLength={20_000} enterKeyHint="enter" />
-        <div className="composer-footer"><span>回车换行，点击箭头发送</span><span className="composer-actions">{selectedId && running && <button className="stop-button" type="button" aria-label="中断当前任务" title="中断当前任务" onClick={() => { if (!selectedId || !detail?.thread.activeTurnId) return; void api.interrupt(selectedId, detail.thread.activeTurnId).then(() => loadThread(selectedId, true)).catch((caught) => setError(errorMessage(caught))); }}><Square size={16} fill="currentColor" /></button>}<button className="send-button" type="submit" aria-label={running ? "追加指导" : "发送消息"} disabled={!composer.trim() || busy || (newTask && !projects.find((project) => project.id === projectId)?.canStart)}><span>{busy ? <LoaderCircle className="spin" size={20} /> : <ArrowUp size={22} />}</span></button></span></div>
+        <div className="composer-footer"><span>回车换行，点击箭头发送</span><span className="composer-actions">{selectedId && running && <button className="stop-button" type="button" aria-label="中断当前任务" title="中断当前任务" onClick={() => { if (!selectedId || !detail?.thread.activeTurnId) return; void api.interrupt(selectedId, detail.thread.activeTurnId).then(() => loadThread(selectedId, true)).catch((caught) => setError(errorMessage(caught))); }}><Square size={16} fill="currentColor" /></button>}<button className="send-button" type="submit" aria-label={running ? "排队发送" : "发送消息"} disabled={!composer.trim() || busy || (newTask && !projects.find((project) => project.id === projectId)?.canStart)}><span>{busy ? <LoaderCircle className="spin" size={20} /> : <ArrowUp size={22} />}</span></button></span></div>
       </form>}
       {!isOnline && token && <div className="offline-banner"><WifiOff size={15} />电脑端不可用，请确认 CodexPhone 正在运行</div>}
       {hostStatus?.lastError && <span className="sr-only">{hostStatus.lastError}</span>}

@@ -11,6 +11,7 @@ import { isRecord } from "@codexphone/shared";
 import { AppServerClient, type ServerRequest } from "./app-server.js";
 import { ApprovalQueue } from "./approvals.js";
 import { OperationStore } from "./operations.js";
+import { MessageQueue } from "./queue.js";
 import { normalizeThread, normalizeTurn, pageData, stringOrNull } from "./normalize.js";
 import { modelSelection, normalizeModel } from "./models.js";
 import { readImage } from "./media.js";
@@ -23,6 +24,7 @@ await host.register(websocket);
 const stateDir = path.resolve(process.env.CODEXPHONE_HOME || path.join(homedir(), ".codexphone"));
 const store = new DeviceStore(stateDir);
 const operations = new OperationStore(stateDir);
+const messageQueue = new MessageQueue(stateDir);
 const projectStore = new ProjectStore(stateDir);
 const port = Number(process.env.PORT || 4318);
 const bindHost = process.env.HOST || "0.0.0.0";
@@ -101,7 +103,7 @@ async function knownProjects(): Promise<Project[]> {
 }
 async function detail(threadId: string, initialCursor?: string): Promise<ThreadDetail> {
   if (server().transport === "websocket" && !ownedThreads.has(threadId)) {
-    const resumed = requireObject(await server().request("thread/resume", { threadId, excludeTurns: false }));
+    const resumed = requireObject(await server().request("thread/resume", { threadId, excludeTurns: true }));
     ownedThreads.add(threadId); externalThreads.delete(threadId);
     const thread = isRecord(resumed.thread) ? resumed.thread : {};
     const turns = Array.isArray(thread.turns) ? thread.turns : [];
@@ -110,15 +112,42 @@ async function detail(threadId: string, initialCursor?: string): Promise<ThreadD
     if (typeof resumed.model === "string" && !selections.has(threadId)) selections.set(threadId, { model: resumed.model, ...(typeof resumed.reasoningEffort === "string" ? { effort: resumed.reasoningEffort } : {}) });
   }
   const read = requireObject(await server().request("thread/read", { threadId })); const thread = normalizeThread(read.thread); if (!thread) throw new HttpError(404, "Thread not found"); const turns: ThreadDetail["turns"] = []; let cursor: unknown = initialCursor || null;
-  do { const page = requireObject(await server().request("thread/turns/list", { threadId, limit: 40, itemsView: "full", cursor })); for (const value of pageData(page)) { const turn = requireObject(value); turns.push(normalizeTurn(turn, Array.isArray(turn.items) ? turn.items : [])); } cursor = page.nextCursor; } while (typeof cursor === "string" && cursor.length > 0 && turns.length < 200);
-  if (server().transport === "websocket") {
+  const page = requireObject(await server().request("thread/turns/list", { threadId, limit: 20, itemsView: "full", sortDirection: "desc", cursor }));
+  for (const value of pageData(page)) { const turn = requireObject(value); turns.push(normalizeTurn(turn, Array.isArray(turn.items) ? turn.items : [])); }
+  cursor = page.nextCursor;
+  if (server().transport === "websocket" && !initialCursor) {
     const running = turns.find((turn) => turn.status === "inProgress");
     if (running) activeTurns.set(threadId, running.id);
     else if (!(isRecord(thread.status) && thread.status.type === "active")) activeTurns.delete(threadId);
   }
   const active = activeTurns.get(threadId) || null;
-  turns.sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
+  // The API page is descending; reverse instead of sorting nullable/equal timestamps.
+  turns.reverse();
   return { thread: { ...thread, canControl: ownedThreads.has(threadId), activeTurnId: active, writeState: ownedThreads.has(threadId) ? "owned" : externalThreads.has(threadId) ? "external" : "unknown", isPinned: store.favorites.has(thread.id) }, turns, nextCursor: typeof cursor === "string" ? cursor : null, approvals: approvals?.list(threadId) || [], model: selections.get(threadId)?.model || thread.model, effort: selections.get(threadId)?.effort || null };
+}
+const queueTimers = new Map<string, NodeJS.Timeout>();
+function pumpQueue(threadId: string): void {
+  if (stopping || !appServer || queueTimers.has(threadId) || !messageQueue.list(threadId).some(e => e.state === "queued")) return;
+  queueTimers.set(threadId, setTimeout(() => {
+    queueTimers.delete(threadId);
+    void serialized(threadId, async () => {
+      if (!appServer) return;
+      const snapshot = await detail(threadId);
+      if (snapshot.thread.activeTurnId || approvals?.list(threadId).length) return;
+      if (messageQueue.list(threadId).some(e => e.state === "unknown" || e.state === "dispatching")) return;
+      const next = messageQueue.list(threadId).find(e => e.state === "queued");
+      if (!next) return;
+      if (!store.hasDevice(next.deviceId)) { await messageQueue.cancel(next.id, threadId); emit({ type: "queue-updated", threadId }); return; }
+      const entry = await messageQueue.claim(next.id, threadId);
+      emit({ type: "queue-updated", threadId });
+      try {
+        await server().request("turn/start", { threadId, ...(entry.model ? { model: entry.model } : {}), ...(entry.effort ? { effort: entry.effort } : {}), input: [{ type: "text", text: entry.prompt }] }, 60_000);
+        await messageQueue.finish(entry.id, threadId, "completed");
+        selections.set(threadId, { ...(entry.model ? { model: entry.model } : {}), ...(entry.effort ? { effort: entry.effort } : {}) });
+      } catch (e) { await messageQueue.finish(entry.id, threadId, "unknown", publicError(e)); }
+      emit({ type: "queue-updated", threadId }); emit({ type: "refresh-thread", threadId });
+    }).catch(() => { /* Keep undispatched entries queued while the backend is unavailable. */ });
+  }, 250));
 }
 function publicNotification(method: string, params: Record<string, unknown>): unknown | null {
   const threadId = stringOrNull(params.threadId); if (method === "item/agentMessage/delta") return { type: "agent-delta", threadId, turnId: stringOrNull(params.turnId), itemId: stringOrNull(params.itemId), delta: typeof params.delta === "string" ? params.delta : typeof params.text === "string" ? params.text : "" }; if (method === "turn/started" || method === "turn/completed") return { type: "turn-status", method, threadId, turnId: stringOrNull(isRecord(params.turn) ? params.turn.id : params.turnId), status: isRecord(params.turn) ? params.turn.status ?? null : params.status ?? null }; if (method === "item/completed" || method === "item/started") return { type: "item-status", method, threadId, turnId: stringOrNull(params.turnId), itemId: stringOrNull(params.itemId), itemType: stringOrNull(params.itemType) }; if (method === "serverRequest/resolved") return { type: "approval-resolved", threadId, requestId: params.requestId ?? null }; return null;
@@ -126,7 +155,7 @@ function publicNotification(method: string, params: Record<string, unknown>): un
 
 host.addHook("onRequest", async (request) => { if (!originAllowed(request.headers.origin, request.headers.host, allowedOrigins)) throw new HttpError(403, "Origin is not allowed"); if (request.url.startsWith("/api/") && !request.url.startsWith("/api/health") && !request.url.startsWith("/api/pair")) requireDevice(request); });
 host.get("/api/health", async () => ({ ...hostStatus, activeTasks: activeTurns.size, pairedDevices: store.list().length }));
-host.get("/api/capabilities", async () => ({ hostVersion: "0.2.0", protocolVersion: 1, capabilities: ["idempotent-send", "operation-status", "global-approvals", "websocket-ticket", "media"], requestRetentionDays: 7 }));
+host.get("/api/capabilities", async () => ({ hostVersion: "0.2.1", protocolVersion: 1, capabilities: ["idempotent-send", "operation-status", "global-approvals", "websocket-ticket", "media", "message-queue", "latest-history"], requestRetentionDays: 7 }));
 host.get<{ Params: { requestId: string } }>("/api/operations/:requestId", async (request) => {
   const entry = operations.get(requireDevice(request).id, request.params.requestId);
   if (!entry) throw new HttpError(404, "Request not found");
@@ -154,6 +183,36 @@ host.delete<{ Params: { projectId: string } }>("/api/projects/:projectId", async
 host.get("/api/models", async () => ({ models: await models(), defaultModel: server().metadata.model }));
 host.get("/api/threads", async (request) => { const query = request.query as { cursor?: string; limit?: string; projectId?: string; search?: string }; const project = (await knownProjects()).find((item) => item.id === query.projectId); const params: Record<string, unknown> = { ...listDefaults, limit: Math.min(50, Math.max(1, Number(query.limit) || 30)), cursor: query.cursor || null, searchTerm: query.search?.slice(0, 120) || null }; if (project?.path) params.cwd = project.path; const result = requireObject(await server().request("thread/list", params)); const threads = pageData(result).map(normalizeThread).filter((item): item is ThreadSummary => item !== null).map((item) => ({ ...item, isPinned: store.favorites.has(item.id), canControl: ownedThreads.has(item.id), activeTurnId: activeTurns.get(item.id) || null, writeState: ownedThreads.has(item.id) ? "owned" as const : externalThreads.has(item.id) ? "external" as const : "unknown" as const })); return { threads, nextCursor: typeof result.nextCursor === "string" ? result.nextCursor : null }; });
 host.get<{ Params: { threadId: string }; Querystring: { cursor?: string } }>("/api/threads/:threadId", async (request) => detail(request.params.threadId, request.query.cursor));
+host.get<{ Params: { threadId: string } }>("/api/threads/:threadId/queue", async request => ({ messages: messageQueue.list(request.params.threadId) }));
+host.post<{ Params: { threadId: string } }>("/api/threads/:threadId/queue", async request => {
+  const body = requireObject(request.body), threadId = request.params.threadId;
+  const prompt = promptText(body.prompt), selection = modelSelection(body, await models());
+  return operations.run(requireDevice(request).id, body.clientRequestId, request.url, body, async () => {
+    const entry = await messageQueue.enqueue({ threadId, deviceId: requireDevice(request).id, prompt, ...selection });
+    emit({ type: "queue-updated", threadId }); pumpQueue(threadId);
+    return { threadId, queueId: entry.id };
+  });
+});
+host.delete<{ Params: { threadId: string; queueId: string } }>("/api/threads/:threadId/queue/:queueId", async request => {
+  const { threadId, queueId } = request.params;
+  await serialized(threadId, () => messageQueue.cancel(queueId, threadId)); emit({ type: "queue-updated", threadId }); pumpQueue(threadId);
+  return { cancelled: true };
+});
+host.post<{ Params: { threadId: string; queueId: string } }>("/api/threads/:threadId/queue/:queueId/guide", async request => {
+  const { threadId, queueId } = request.params; const body = requireObject(request.body);
+  return operations.run(requireDevice(request).id, body.clientRequestId, request.url, body, () => serialized(threadId, async () => {
+    await detail(threadId);
+    const expectedTurnId = activeTurns.get(threadId);
+    if (!expectedTurnId) throw new HttpError(409, "本轮已结束，消息将按队列顺序发送，请刷新");
+    const entry = await messageQueue.claim(queueId, threadId);
+    try {
+      await server().request("turn/steer", { threadId, expectedTurnId, input: [{ type: "text", text: entry.prompt }] });
+      await messageQueue.finish(queueId, threadId, "guided");
+    } catch (e) { await messageQueue.finish(queueId, threadId, "unknown", publicError(e)); throw e; }
+    finally { emit({ type: "queue-updated", threadId }); }
+    return { threadId, queueId };
+  }));
+});
 host.put<{ Params: { threadId: string } }>("/api/favorites/:threadId", async (request) => { await store.favorite(request.params.threadId, true); return { threadId: request.params.threadId, isPinned: true }; });
 host.delete<{ Params: { threadId: string } }>("/api/favorites/:threadId", async (request) => { await store.favorite(request.params.threadId, false); return { threadId: request.params.threadId, isPinned: false }; });
 host.get<{ Querystring: { threadId: string; file: string } }>("/api/media", async (request, reply) => {
@@ -227,7 +286,7 @@ host.get("/api/devices", async (request) => { const device = requireDevice(reque
 host.delete<{ Params: { deviceId: string } }>("/api/devices/:deviceId", async (request) => { const device = requireDevice(request); if (device.id !== request.params.deviceId) throw new HttpError(403, "A device can only revoke its own session"); await store.revoke(device.id); for (const [socket, id] of socketDevices) if (id === device.id) socket.close(1008, "Device revoked"); return { revoked: true }; });
 host.setErrorHandler((error, _request, reply) => { reply.code(error instanceof HttpError ? error.statusCode : 500).send({ error: publicError(error) }); });
 
-await mkdir(stateDir, { recursive: true }); await store.load(); await projectStore.load(); await operations.load();
+await mkdir(stateDir, { recursive: true }); await store.load(); await projectStore.load(); await operations.load(); await messageQueue.load();
 async function connectServer(): Promise<void> {
   try {
     const client = await AppServerClient.start();
@@ -247,6 +306,7 @@ async function connectServer(): Promise<void> {
       if (threadId && notification.method === "turn/started" && typeof turn?.id === "string") activeTurns.set(threadId, turn.id);
       if (threadId && notification.method === "turn/completed") {
         if (!turn || activeTurns.get(threadId) === turn.id) activeTurns.delete(threadId);
+        pumpQueue(threadId);
         // Shared clients stay subscribed so later desktop turns reach the phone immediately.
         if (client.transport === "stdio") void serialized(threadId, () => releaseThread(threadId)).catch(() => {});
       }
@@ -259,6 +319,7 @@ async function connectServer(): Promise<void> {
       hostStatus = { ...hostStatus, status: "degraded", lastError: "电脑端连接已断开，正在重新连接。发送前请等待恢复。" };
       emit({ type: "host-status", status: hostStatus }); scheduleReconnect();
     });
+    for (const entry of messageQueue.list()) pumpQueue(entry.threadId);
   } catch (error) {
     hostStatus = { ...hostStatus, status: "degraded", lastError: publicError(error) };
     emit({ type: "host-status", status: hostStatus }); scheduleReconnect();
@@ -272,5 +333,7 @@ function scheduleReconnect(): void {
 await connectServer();
 const webDist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../web/dist"); await host.register(fastifyStatic, { root: webDist, prefix: "/", wildcard: true }); await host.listen({ host: bindHost, port }); host.log.info({ address: `http://${bindHost}:${port}`, model: hostStatus.model, provider: hostStatus.provider, pairing: store.pairingInfo });
 export { host };
-export async function closeHost(): Promise<void> { stopping = true; clearTimeout(reconnectTimer); appServer?.close(); await host.close(); }
+export async function closeHost(): Promise<void> { stopping = true; clearInterval(queueSweep); clearTimeout(reconnectTimer); for (const timer of queueTimers.values()) clearTimeout(timer); queueTimers.clear(); appServer?.close(); await host.close(); }
 const shutdown = async () => { await closeHost(); process.exit(0); }; process.on("SIGINT", () => void shutdown()); process.on("SIGTERM", () => void shutdown());
+const queueSweep = setInterval(() => { for (const entry of messageQueue.list()) pumpQueue(entry.threadId); }, 5000);
+queueSweep.unref();

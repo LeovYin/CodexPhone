@@ -2,7 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 const root = path.resolve(process.argv[2] || ".");
 const excluded = new Set(["node_modules", ".git", "releases", ".codexphone", "artifacts", "test-results", "playwright-report", "dist", ".gradle", "build", ".idea", ".kotlin"]);
-const denied = new Set(["auth.json", "devices.json", "projects.json", "operations.json", ".env", ".env.local", "launcher-paths.txt", "local.properties", "keystore.properties"]);
+const denied = new Set(["auth.json", "devices.json", "projects.json", "operations.json", "message-queue.json", ".env", ".env.local", "launcher-paths.txt", "local.properties", "keystore.properties"]);
 let count = 0;
 async function walk(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {

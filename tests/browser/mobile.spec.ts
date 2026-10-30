@@ -18,6 +18,20 @@ test("Enter inserts newline and model/effort reach the clicked send action", asy
   expect(state.posts.find((entry: { pathname: string }) => entry.pathname === "/api/threads").body).toEqual({ projectId: "project", prompt: "第一行\n第二行", model: "b", effort: "high" });
 });
 
+test("Mermaid renders locally and conversation navigation jumps to latest", async ({ page }) => {
+  const state = await setupFixture(page);
+  state.content = "```mermaid\nflowchart TD\n A[手机] --> B[电脑]\n```\n\n" + "内容段落\n\n".repeat(60);
+  await page.goto("/"); await page.getByRole("button", { name: /手机界面与内容渲染/ }).click();
+  await expect(page.getByAltText("Mermaid 图表")).toBeAttached();
+  await expect.poll(() => page.getByAltText("Mermaid 图表").evaluate((e: HTMLImageElement) => e.naturalWidth)).toBeGreaterThan(0);
+  await expect.poll(() => page.locator(".conversation-content").evaluate(e => e.scrollHeight - e.scrollTop - e.clientHeight)).toBeLessThan(30);
+  await page.getByRole("button", { name: "对话导航", exact: true }).click();
+  await page.getByRole("button", { name: /第 1 轮/ }).click();
+  await page.getByRole("button", { name: "对话导航", exact: true }).click();
+  await page.getByRole("button", { name: "跳到最新消息", exact: true }).click();
+  await expect.poll(() => page.locator(".conversation-content").evaluate(e => e.scrollHeight - e.scrollTop - e.clientHeight)).toBeLessThan(30);
+});
+
 test("Markdown, tables and sanitized SVG render with authenticated local images", async ({ page }) => {
   const state = await setupFixture(page); await page.goto("/");
   await page.getByRole("button", { name: /手机界面与内容渲染/ }).click();
@@ -66,15 +80,33 @@ test("background updates preserve detail and stale responses cannot replace a ne
   await expect(page.locator(".breadcrumbs")).toContainText("同步验收");
 });
 
-test("running tasks lock model changes, support guidance and interrupt", async ({ page }) => {
+test("running tasks queue by default, guide explicitly and interrupt", async ({ page }) => {
   const state = await setupFixture(page); state.running = true; await page.goto("/");
   await page.getByRole("button", { name: /手机界面与内容渲染/ }).click();
   await expect(page.getByLabel("选择模型")).toBeDisabled();
   await page.getByRole("textbox", { name: "消息", exact: true }).fill("继续指导");
-  await page.getByRole("button", { name: "追加指导", exact: true }).click();
-  await expect.poll(() => state.posts.some((entry: { pathname: string }) => entry.pathname.endsWith("/steer"))).toBe(true);
+  await page.getByRole("button", { name: "排队发送", exact: true }).click();
+  await expect(page.getByLabel("排队消息")).toContainText("继续指导");
+  expect(state.posts.some((entry: { pathname: string }) => entry.pathname.endsWith("/steer"))).toBe(false);
+  await page.getByRole("button", { name: "引导", exact: true }).click();
+  await expect.poll(() => state.posts.some((entry: { pathname: string }) => entry.pathname.endsWith("/guide"))).toBe(true);
   await page.getByRole("button", { name: "中断当前任务", exact: true }).click();
   await expect(page.getByLabel("选择模型")).toBeEnabled();
+});
+
+test("lost queue response is reconciled after reload without a duplicate submission", async ({ page }) => {
+  const state = await setupFixture(page); state.running = true; state.queueResponseLost = true;
+  await page.goto("/"); await page.getByRole("button", { name: /手机界面与内容渲染/ }).click();
+  await page.getByRole("textbox", { name: "消息", exact: true }).fill("只排队一次");
+  await page.getByRole("button", { name: "排队发送", exact: true }).click();
+  await expect(page.getByRole("button", { name: "已检查，清除提交记录" })).toBeVisible();
+  state.running = false;
+  await page.reload(); await page.getByRole("button", { name: /手机界面与内容渲染/ }).click();
+  await expect(page.getByRole("textbox", { name: "消息", exact: true })).toHaveValue("只排队一次");
+  await page.getByRole("button", { name: "发送消息", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "消息", exact: true })).toHaveValue("");
+  expect(state.posts.filter((entry: { pathname: string }) => entry.pathname.endsWith("/queue"))).toHaveLength(1);
+  expect(state.posts.filter((entry: { pathname: string }) => entry.pathname.endsWith("/turns"))).toHaveLength(0);
 });
 
 test("project filters, favorites, pagination, approvals and unpair controls", async ({ page }) => {

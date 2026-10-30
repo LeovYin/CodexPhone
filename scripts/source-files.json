@@ -46,6 +46,7 @@
     "docs/launcher.png",
     "docs/android-pair.png",
     "scripts/Build-Android.ps1",
+    "scripts/Sync-Diagrams.mjs",
     "apps/android/README.md",
     "apps/android/THIRD_PARTY_NOTICES.md",
     "apps/android/THIRD_PARTY_LICENSES.txt",

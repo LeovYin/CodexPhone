@@ -35,6 +35,8 @@ import kotlinx.serialization.json.JsonElement
 )
 @Serializable data class ApprovalsResponse(val approvals: List<ApprovalRequest> = emptyList())
 @Serializable data class ApiError(val error: String? = null)
+@Serializable data class QueuedMessage(val id: String, val threadId: String, val prompt: String, val state: String, val error: String? = null)
+@Serializable data class QueueResponse(val messages: List<QueuedMessage> = emptyList())
 @Serializable data class PendingSubmission(
     val requestId: String, val threadId: String?, val projectId: String?,
     val prompt: String, val model: String?, val effort: String?, val kind: String = "send",

@@ -32,6 +32,14 @@ fun splitMessageAssets(markdown: String, attachments: List<String>): MessageAsse
 }
 
 @Composable fun MarkdownMessage(markdown: String, attachments: List<String>, threadId: String, api: CodexPhoneApi?) {
+    val blocks = remember(markdown) { splitMermaidBlocks(markdown) }
+    if (blocks.any { it.diagram }) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            blocks.forEach { block -> if (block.diagram) MermaidDiagram(block.text) else MarkdownMessage(block.text, emptyList(), threadId, api) }
+            if (attachments.isNotEmpty()) MarkdownMessage("", attachments, threadId, api)
+        }
+        return
+    }
     val context = LocalContext.current
     val assets = remember(markdown, attachments) { splitMessageAssets(markdown, attachments) }
     val markwon = remember(context) {

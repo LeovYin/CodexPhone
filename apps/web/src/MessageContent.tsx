@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import DOMPurify from "dompurify";
 import { X, ZoomIn } from "lucide-react";
 import { getToken } from "./api";
+import { MermaidDiagram } from "./MermaidDiagram";
 
 const isRemote = (src: string) => /^https?:\/\//i.test(src);
 const isDataImage = (src: string) => /^data:image\/(?:png|jpe?g|webp|gif|svg\+xml|avif);/i.test(src) && src.length < 16 * 1024 * 1024;
@@ -44,10 +45,11 @@ function SvgPreview({ source, threadId }: { source: string; threadId: string }) 
 
 export function MessageContent({ text, images = [], threadId }: { text: string; images?: string[]; threadId: string }) {
   // Raw HTML remains disabled. Only complete SVG fragments receive an isolated, sanitized image preview.
-  const pieces = text.split(/(```(?:svg|xml)\s*\n[\s\S]*?```|<svg\b[^>]*>[\s\S]*?<\/svg>)/gi);
+  const pieces = text.split(/(```(?:mermaid|svg|xml)\s*\n[\s\S]*?```|<svg\b[^>]*>[\s\S]*?<\/svg>)/gi);
   return <div className="message-body markdown">
     {pieces.map((part, index) => {
       if (!part) return null;
+      if (/^```mermaid\s*\n/i.test(part)) return <MermaidDiagram key={index} source={part.replace(/^```mermaid\s*\n/i, "").replace(/```$/, "").trim()} threadId={threadId} />;
       const source = part.replace(/^```(?:svg|xml)\s*\n/i, "").replace(/```$/, "").trim();
       if (/^<svg\b/i.test(source) && /<\/svg>$/.test(source)) return <SvgPreview key={index} source={source} threadId={threadId} />;
       return <Markdown key={index} skipHtml remarkPlugins={[remarkGfm]} urlTransform={(url, key) => key === "src" || /\.(?:svg|png|jpe?g|webp|gif|avif)(?:$|\?)/i.test(url) ? url : defaultUrlTransform(url)} components={{

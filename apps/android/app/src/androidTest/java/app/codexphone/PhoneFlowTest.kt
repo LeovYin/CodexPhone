@@ -21,6 +21,14 @@ import org.junit.*
 import org.junit.runner.RunWith
 import java.util.concurrent.CopyOnWriteArrayList
 import java.io.File
+import android.view.View
+import android.view.ViewGroup
+import android.view.inspector.WindowInspector
+import android.webkit.WebView
+import android.widget.TextView
+import android.graphics.Rect
+import androidx.test.platform.app.InstrumentationRegistry
+import java.util.concurrent.atomic.AtomicReference
 
 @RunWith(AndroidJUnit4::class)
 class PhoneFlowTest {
@@ -28,11 +36,14 @@ class PhoneFlowTest {
     private val server = MockWebServer()
     private lateinit var vm: PhoneViewModel
     private val submissions = CopyOnWriteArrayList<JsonObject>()
+    private val queued = CopyOnWriteArrayList<JsonObject>()
+    @Volatile private var guided = false
     private val sockets = CopyOnWriteArrayList<WebSocket>()
     @Volatile private var approvalPending = true
     @Volatile private var interrupted = false
     @Volatile private var showRunning = false
     @Volatile private var operationQueries = 0
+    @Volatile private var longHistory = false
     private val request = """{"id":"approval","threadId":"shared","turnId":"turn","kind":"command","title":"允许执行测试命令？","detail":"echo fixture","canAccept":true,"questions":[]}"""
     @Before fun setup() {
         val app = ApplicationProvider.getApplicationContext<Application>()
@@ -50,11 +61,18 @@ class PhoneFlowTest {
                 val body = when {
                     path == "/api/health" -> """{"status":"ready","model":"fixture-model","provider":"local-fixture","codexVersion":"fixture","transport":"websocket"}"""
                     path == "/api/pair" -> """{"token":"fixture-token","deviceId":"device"}"""
-                    path == "/api/capabilities" -> """{"hostVersion":"0.2.0","protocolVersion":1,"capabilities":["idempotent-send","global-approvals"]}"""
+                    path == "/api/capabilities" -> """{"hostVersion":"0.2.1","protocolVersion":1,"capabilities":["idempotent-send","global-approvals","message-queue"]}"""
                     path == "/api/projects" -> """{"projects":[{"id":"project","name":"测试项目","canStart":true}]}"""
                     path == "/api/models" -> """{"defaultModel":"fixture-model","models":[{"id":"fixture-model","name":"测试模型","efforts":["low","high"],"defaultEffort":"low"}]}"""
                     path == "/api/ws-ticket" -> """{"ticket":"one-use-ticket"}"""
                     path.startsWith("/api/operations/") -> { operationQueries++; """{"state":"completed","result":{"threadId":"shared","turnId":"turn"}}""" }
+                    path.endsWith("/queue/queued/guide") -> { guided = true; queued.clear(); """{"threadId":"shared"}""" }
+                    path.endsWith("/queue") && r.method == "POST" -> {
+                        val payload = Json.parseToJsonElement(r.body.readUtf8()).jsonObject
+                        queued.add(buildJsonObject { put("id", "queued"); put("threadId", "shared"); put("prompt", payload["prompt"]!!); put("state", "queued") })
+                        """{"threadId":"shared","queueId":"queued"}"""
+                    }
+                    path.endsWith("/queue") -> buildJsonObject { put("messages", JsonArray(queued.toList())) }.toString()
                     path == "/api/approvals" -> """{"approvals":[""" + (if (approvalPending) request else "") + "]}"
                     path == "/api/approvals/approval" -> { approvalPending = false; """{"threadId":"shared"}""" }
                     path.endsWith("/interrupt") -> { interrupted = true; showRunning = false; "{}" }
@@ -77,8 +95,18 @@ class PhoneFlowTest {
         vm.setForeground(true)
     }
     private fun detail(): String {
+        if (longHistory) return buildJsonObject {
+            putJsonObject("thread") { put("id", "shared"); put("name", "共享测试任务"); put("canControl", true) }
+            putJsonArray("turns") { repeat(30) { index -> add(buildJsonObject {
+                put("id", "history-$index")
+                putJsonArray("items") { add(buildJsonObject {
+                    put("id", "message-$index"); put("type", "userMessage")
+                    put("text", if (index == 29) "最新对话标记" else "历史对话第 $index 轮\n" + "用于验证长对话定位。\n".repeat(3))
+                }) }
+            }) } }
+        }.toString()
         val items = buildJsonArray {
-            add(buildJsonObject { put("id", "intro"); put("type", "agentMessage"); put("text", "# 原生测试\n\n| A | B |\n|---|---|\n| 1 | 2 |") })
+            add(buildJsonObject { put("id", "intro"); put("type", "agentMessage"); put("text", "# 原生测试\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```mermaid\nflowchart TD\n A[Phone] --> B[Computer]\n```\n") })
             submissions.forEachIndexed { index, message -> add(buildJsonObject { put("id", "user-" + index); put("type", "userMessage"); put("text", message["prompt"]!!.jsonPrimitive.content) }) }
         }
         return buildJsonObject {
@@ -113,6 +141,13 @@ class PhoneFlowTest {
         Assert.assertEquals("手机测试\n第二行", submissions[0]["prompt"]!!.jsonPrimitive.content)
         Assert.assertEquals("high", submissions[0]["effort"]!!.jsonPrimitive.content)
         Assert.assertTrue(submissions[0]["clientRequestId"]!!.jsonPrimitive.content.length >= 16)
+        compose.onNodeWithText("发送后排队，可点击引导干预…").performTextInput("排队后手动引导")
+        compose.onNodeWithContentDescription("排队发送").performClick()
+        compose.waitUntil(15000) { vm.state.value.queued.size == 1 && vm.state.value.pending == null }
+        Assert.assertEquals(1, submissions.size)
+        screenshot("queue-test.png")
+        compose.onNodeWithText("引导", useUnmergedTree = true).performClick()
+        compose.waitUntil(15000) { guided && vm.state.value.queued.isEmpty() && vm.state.value.pending == null }
         compose.onNodeWithContentDescription("中断任务").performClick()
         compose.onNodeWithText("中断", useUnmergedTree = true).performClick()
         compose.waitUntil(10000) { interrupted && vm.state.value.selectedThread?.thread?.activeTurnId == null }
@@ -125,6 +160,65 @@ class PhoneFlowTest {
         compose.onNodeWithText("共享测试任务").performClick()
         compose.waitUntil(10000) { vm.state.value.draft == "保存草稿" }
         compose.onNodeWithText("保存草稿").assertExists()
+    }
+    @Test fun bundledMermaidRendersWithoutExternalRequests() {
+        compose.onNodeWithText("电脑地址").performTextInput(server.url("/").newBuilder().host("127.0.0.1").build().toString())
+        compose.onNodeWithText("一次性配对码").performTextInput("fixture-code")
+        compose.onNodeWithText("配对并连接").performClick()
+        compose.waitUntil(15000) { vm.state.value.threads.isNotEmpty() }
+        compose.onNodeWithText("共享测试任务").performClick()
+        compose.waitUntil(15000) { vm.state.value.selectedThread != null }
+        val rendered = AtomicReference("false")
+        fun webViews(view: View): List<WebView> = if (view is WebView) listOf(view) else if (view is ViewGroup) (0 until view.childCount).flatMap { webViews(view.getChildAt(it)) } else emptyList()
+        compose.waitUntil(20000) {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                WindowInspector.getGlobalWindowViews().flatMap(::webViews).forEach { web ->
+                    web.evaluateJavascript("document.querySelectorAll('#chart svg').length > 0") { rendered.set(it) }
+                }
+            }
+            rendered.get() == "true"
+        }
+        screenshot("mermaid-test.png")
+    }
+    @Test fun longConversationOpensAtLatestAndNavigationJumpsBothWays() {
+        longHistory = true
+        compose.onNodeWithText("电脑地址").performTextInput(server.url("/").newBuilder().host("127.0.0.1").build().toString())
+        compose.onNodeWithText("一次性配对码").performTextInput("fixture-code")
+        compose.onNodeWithText("配对并连接").performClick()
+        compose.waitUntil(15000) { vm.state.value.threads.isNotEmpty() }
+        compose.onNodeWithText("共享测试任务").performClick()
+        compose.waitUntil(15000) { vm.state.value.selectedThread != null }
+        screenshot("long-history-test.png")
+        waitForNativeText("最新对话标记")
+        compose.onNodeWithContentDescription("对话导航").performClick()
+        screenshot("navigation-test.png")
+        compose.onNodeWithText("第 1 轮", useUnmergedTree = true).performClick()
+        waitForNativeText("历史对话第 0 轮")
+        compose.onNodeWithContentDescription("对话导航").performClick()
+        compose.onNodeWithText("跳到最新消息").performClick()
+        waitForNativeText("最新对话标记")
+    }
+    // Markwon uses native TextViews; Compose semantics bounds do not reliably
+    // represent these interop children. Check the actual clipped native bounds.
+    private fun waitForNativeText(text: String) {
+        fun visible(view: View): Boolean {
+            if (view is TextView && view.text.contains(text) && view.isShown) {
+                val bounds = Rect()
+                if (view.getGlobalVisibleRect(bounds) && bounds.width() > 0 && bounds.height() > 0) return true
+            }
+            return view is ViewGroup && (0 until view.childCount).any { visible(view.getChildAt(it)) }
+        }
+        compose.waitUntil(10000) {
+            var found = false
+            InstrumentationRegistry.getInstrumentation().runOnMainSync { found = WindowInspector.getGlobalWindowViews().any(::visible) }
+            found
+        }
+    }
+    private fun screenshot(name: String) {
+        compose.onAllNodes(isRoot()).onLast().captureToImage().asAndroidBitmap().let { bitmap ->
+            val app = ApplicationProvider.getApplicationContext<Application>()
+            File(app.filesDir, name).outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
     }
     @Test fun durablePendingReconcilesAfterClientRecreationWithoutResending() {
         val app = ApplicationProvider.getApplicationContext<Application>()

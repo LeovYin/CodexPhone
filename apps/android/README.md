@@ -4,7 +4,7 @@ Kotlin + Jetpack Compose 客户端，通过已有 Tailscale VPN 连接 Windows C
 
 ## 安装与首次连接
 
-1. 从仓库 Releases 下载 CodexPhone-0.2.0-android.apk 并安装，系统要求 Android 8.0+。这是签名的 Release APK，无需 Android Studio。
+1. 从仓库 Releases 下载 CodexPhone-0.2.1-android.apk 并安装，系统要求 Android 8.0+。这是签名的 Release APK，无需 Android Studio。
 2. 电脑打开同版本 Windows EXE。若已有旧共享服务，任务结束后点击新版面板的“配对另一台手机”，刷新手机桥接与一次性配对码；已有手机授权会保留。App 设置页可查看实际 Host 版本。
 3. 手机和电脑加入同一个 Tailscale 网络，并打开手机 Tailscale。无需 Serve/Funnel。
 4. 电脑启动共享连接，在 App 填写面板地址（http://100.x.x.x:4318）和一次性配对码。地址不要附加网页路径。
@@ -12,18 +12,24 @@ Kotlin + Jetpack Compose 客户端，通过已有 Tailscale VPN 连接 Windows C
 
 Host 0.2.0 提供请求去重与状态查询；旧 Host 可以浏览，但 App 会禁止发送。不要为升级强行停止正在工作的 Codex，待任务结束再切换。
 
+本版队列和最新历史分页需要 Host 0.2.1。设置中核对实际运行的 Host 版本；只安装新版 EXE 而继续复用旧桥接，不会自动启用新能力。任务结束后用新版面板“配对另一台手机”刷新桥接，已有手机授权保留。
+
 后续同签名、更高 versionCode 的 APK 可直接覆盖安装。若安装过本地 Debug APK，签名不同，需要先卸载；卸载会移除手机草稿与凭据。首次安装可为浏览器临时允许“安装未知应用”，安装后可关闭此权限。
 
 ## 当前功能与边界
 
 - 原生任务列表、项目筛选、搜索、分页和收藏。
-- 查看、续聊、新建、追加运行中指令、中断；选择 Host 提供的模型与强度。
+- 查看、续聊、新建、中断；选择 Host 提供的模型与强度。
+- 运行中发送默认排队，输入框上方显示排队条；点击“引导”插入当前轮次，点击移除取消尚未发送的条目。
+- 默认读取最近 20 轮并定位末尾，右上角“对话导航”查看轮次摘要、跳到某轮或最新位置；按需加载更早消息。
 - 前台 WebSocket、断线重连与快照补齐；切回前台重新同步。
 - 全局审批和问答，操作结果同步电脑。
-- Markdown、代码、表格、消息复制、鉴权本地图片与 SVG、图片缩放。
+- Markdown、代码、表格、消息复制、鉴权本地图片与 SVG、图片缩放；完整 Mermaid 代码块离线渲染、放大与源码查看。
 - 每个对话独立草稿、最近对话缓存、待确认请求恢复。
 
 提交前持久保存请求编号。超时后先查询 Host：已完成则确认，未记录才允许用原编号重试；结果不确定时需先检查电脑对话。Host 记录保留 7 天，App 超过 6 天不再提供安全重试。去重依赖保留 Host 状态目录，不要删除记录后重试旧请求。
+
+排队内容持久保存在电脑，手机退出或离线不取消队列。上一轮结束且没有待审批时自动续发；电脑重启时已处于提交中的条目标记为“结果待确认”，不会自动重复发送。核对电脑对话后再移除该记录，后续队列才能继续。“引导”只影响当前轮次，使用该轮次正在使用的模型。
 
 后台不维持永久连接，不提供可靠锁屏通知。电脑任务不受手机退后台影响。当前无图片上传、语音输入、自建 VPN 或多电脑同时连接；项目管理可使用网页。
 
@@ -59,6 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Build-Android.ps1 -C
 - data/ConversationStore.kt：草稿、缓存、提交恢复。
 - data/DeviceCredentialStore.kt：Android Keystore 的 AES-GCM 加密与私有存储。
 - ui/MarkdownMessage.kt：Markwon 原生文本渲染和图片资源识别。
+- ui/MermaidDiagram.kt：仅图表使用隔离 WebView 加载本地 Mermaid，无原生 JavaScript 桥接、无外部请求；聊天界面继续使用 Compose。
 - gradle/libs.versions.toml：依赖版本；app/build.gradle.kts：SDK、签名与构建类型。
 
 练习顺序：先改一个 Compose 组件，再追踪 state → 页面 → 操作 → ViewModel → API → state，然后为一个 API 补测试。当前保持单 app 模块便于阅读，规模增长后再拆模块。

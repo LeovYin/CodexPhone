@@ -1,6 +1,6 @@
 {
   "name": "@codexphone/web",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -13,6 +13,7 @@
     "@codexphone/shared": "workspace:*",
     "dompurify": "^3.4.17",
     "lucide-react": "^0.468.0",
+    "mermaid": "11.12.2",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",

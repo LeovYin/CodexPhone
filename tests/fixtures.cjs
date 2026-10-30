@@ -3,7 +3,7 @@ const markdown = `## 移动端验收\n\n**Markdown 已渲染**，支持列表、
 const summary = (id) => ({ id, name: id === "one" ? "手机界面与内容渲染" : "同步验收", preview: "查看任务进度，继续指导 Codex", cwd: "D:/workspace", model: "a", provider: "custom", updatedAt: new Date().toISOString(), status: { type: "idle" }, turns: 1, isPinned: false, canControl: false, activeTurnId: null, writeState: "unknown" });
 
 async function setupFixture(page) {
-  const state = { posts: [], threads: [summary("one"), summary("two")], sockets: [], conflict: false, offline: false, backendOffline: false, running: false, delay: false, approvals: [], mediaHeaders: [], detailReads: 0, more: false, content: markdown };
+  const state = { posts: [], threads: [summary("one"), summary("two")], sockets: [], conflict: false, offline: false, backendOffline: false, running: false, delay: false, approvals: [], mediaHeaders: [], detailReads: 0, more: false, content: markdown, queue: [], queueResponseLost: false, operations: {} };
   await page.addInitScript(() => { localStorage.setItem("codexphone-device-token", "test-token"); });
   await page.routeWebSocket("**/ws?*", (socket) => { state.sockets.push(socket); socket.send(JSON.stringify({ type: "connected" })); });
   await page.route("**/api/**", async (route) => {
@@ -12,6 +12,14 @@ async function setupFixture(page) {
     const json = (body, status = 200) => route.fulfill({ status, json: body });
     if (method !== "GET") {
       const body = request.postDataJSON(); state.posts.push({ pathname, body, method });
+      if (pathname.endsWith("/queue") && method === "POST") {
+        state.queue.push({ id: "queued-" + state.posts.length, threadId: "one", prompt: body.prompt, state: "queued" });
+        const result = { threadId: "one", queueId: state.queue.at(-1).id };
+        state.operations[body.clientRequestId] = { state: "completed", result };
+        if (state.queueResponseLost) { state.queueResponseLost = false; return route.abort(); }
+        return json(result);
+      }
+      if (pathname.includes("/queue/")) { state.queue = []; return json({ threadId: "one" }); }
       if (pathname === "/api/pair") return json({ token: "test-token", deviceId: "device" });
       if (pathname === "/api/threads") return json({ threadId: "one" });
       if (pathname.endsWith("/turns") && state.conflict) return json({ error: "该对话由电脑端 Codex 持有，当前连接无法接管。原消息已保留。" }, 409);
@@ -21,6 +29,8 @@ async function setupFixture(page) {
       return json({ ok: true, threadId: "one" });
     }
     if (pathname === "/api/health") return json({ status: state.backendOffline ? "degraded" : "ready", transport: "websocket", model: "a", provider: "custom", codexVersion: "fixture", authMode: "apiKey", lastError: null });
+    if (pathname.endsWith("/queue")) return json({ messages: state.queue });
+    if (pathname.startsWith("/api/operations/")) return state.operations[pathname.split("/").at(-1)] ? json(state.operations[pathname.split("/").at(-1)]) : json({ error: "Request not found" }, 404);
     if (state.backendOffline) return json({ error: "Backend unavailable" }, 503);
     if (pathname === "/api/projects") return json({ projects: [{ id: "project", name: "CodexPhone", path: "D:/workspace", canStart: true }] });
     if (pathname === "/api/models") return json({ defaultModel: "a", models: [{ id: "a", name: "Model A", efforts: ["low", "high", "ultra"], defaultEffort: "low" }, { id: "b", name: "Model B", efforts: ["medium", "high"], defaultEffort: "medium" }] });

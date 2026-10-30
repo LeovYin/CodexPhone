@@ -55,7 +55,34 @@ try {
   const detail = await request(`threads/${threadId}`); assert.equal(detail.thread.id, threadId);
   await request(`threads/${threadId}/turns`, { prompt: "phone after backend restart" });
   await waitFor(async () => (await request(`threads/${threadId}`)).turns.some((turn) => turn.items.some((item) => item.text.includes("response 4"))), "send after reconnect");
-  console.log(JSON.stringify({ authenticatedPhoneSend: "passed", duplicateSubmission: "passed", operationStatus: "passed", desktopReceivesPhoneTurn: "passed", subscriptionSurvivesCompletion: "passed", backendRestartRecovery: "passed", pairingPreserved: (await request("health")).pairedDevices === 1, externalApiCalls: 0 }));
+  provider.state.hold = true;
+  const held = await request(`threads/${threadId}/turns`, { prompt: "held queue fixture" });
+  await waitFor(async () => (await request(`threads/${threadId}`)).thread.activeTurnId, "held turn running");
+  await waitFor(() => provider.state.streams.size > 0, "held provider stream opened");
+  const beforeQueue = provider.state.requests.length;
+  const queued = await request(`threads/${threadId}/queue`, { prompt: "automatically run next", clientRequestId: "queued-fixture-request-0001" });
+  assert.deepEqual(await request(`threads/${threadId}/queue`, { prompt: "automatically run next", clientRequestId: "queued-fixture-request-0001" }), queued);
+  assert.equal((await request(`threads/${threadId}/queue`)).messages.length, 1);
+  assert.equal(provider.state.requests.length, beforeQueue, "Queue must not steer or start during a running turn");
+  const guide = await request(`threads/${threadId}/queue`, { prompt: "guide current turn", clientRequestId: "queued-fixture-request-0002" });
+  await request(`threads/${threadId}/queue/${guide.queueId}/guide`, { clientRequestId: "guide-fixture-request-0001" });
+  assert.equal((await request(`threads/${threadId}/queue`)).messages.length, 1, "Guided message leaves queue");
+  provider.state.hold = false;
+  await request(`threads/${threadId}/interrupt`, { turnId: (await request(`threads/${threadId}`)).thread.activeTurnId });
+  await waitFor(async () => (await request(`threads/${threadId}/queue`)).messages.length === 0, "queued task runs after turn completion");
+  await waitFor(async () => !(await request(`threads/${threadId}`)).thread.activeTurnId, "queued turn completed");
+  for (let index = 0; index < 21; index++) {
+    await request(`threads/${threadId}/turns`, { prompt: `history fixture ${index}` });
+    await waitFor(async () => !(await request(`threads/${threadId}`)).thread.activeTurnId, "history turn complete");
+  }
+  const latest = await request(`threads/${threadId}`);
+  assert.equal(latest.turns.length, 20);
+  assert.ok(latest.turns.at(-1).items.some(i => i.text.includes("history fixture 20")), "Latest page ends with newest message");
+  assert.ok(latest.nextCursor);
+  const earlier = await request(`threads/${threadId}?cursor=${encodeURIComponent(latest.nextCursor)}`);
+  assert.ok(earlier.turns.length > 0);
+  assert.ok(!earlier.turns.some(t => latest.turns.some(recent => recent.id === t.id)));
+  console.log(JSON.stringify({ authenticatedPhoneSend: "passed", queueAndExplicitGuidance: "passed", latestHistoryPagination: "passed", duplicateSubmission: "passed", operationStatus: "passed", desktopReceivesPhoneTurn: "passed", subscriptionSurvivesCompletion: "passed", backendRestartRecovery: "passed", pairingPreserved: (await request("health")).pairedDevices === 1, externalApiCalls: 0 }));
 } finally {
   desktop?.close(); if (runtime) await runtime.closeHost(); stopOwnedProcessTree(backend); await provider.close();
   await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 200 });

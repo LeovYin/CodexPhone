@@ -2,6 +2,7 @@ package app.codexphone.data
 
 import app.codexphone.ui.applyDelta
 import app.codexphone.ui.mergeHistory
+import app.codexphone.ui.splitMermaidBlocks
 import app.codexphone.ui.splitMessageAssets
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
@@ -12,6 +13,12 @@ import org.junit.Test
 import java.io.IOException
 
 class CodexPhoneApiTest {
+    @Test fun mermaidBlocksSeparateFromTextAndIncompleteStreamingFencesStayText() {
+        val blocks = splitMermaidBlocks("hello\n```mermaid\nflowchart TD\n A-->B\n```\nend")
+        assertEquals(listOf(false, true, false), blocks.map { it.diagram })
+        assertTrue(blocks[1].text.startsWith("flowchart"))
+        assertFalse(splitMermaidBlocks("```mermaid\nflowchart TD\n A").any { it.diagram })
+    }
     @Test fun refreshPreservesLoadedEarlierPagesAndUpdatesLatestTurn() {
         val current = ThreadDetail(ThreadSummary("a"), listOf(ThreadTurn("old"), ThreadTurn("latest", "inProgress")), nextCursor = "older-page")
         val fresh = ThreadDetail(ThreadSummary("a"), listOf(ThreadTurn("latest", "completed"), ThreadTurn("new")), nextCursor = "first-page")

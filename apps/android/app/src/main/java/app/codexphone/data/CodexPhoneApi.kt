@@ -35,9 +35,13 @@ class CodexPhoneApi(
     suspend fun threads(projectId: String? = null, cursor: String? = null, search: String? = null): ThreadsResponse =
         get("api/threads", mapOf("limit" to "30", "projectId" to projectId, "cursor" to cursor, "search" to search))
     suspend fun thread(id: String, cursor: String? = null): ThreadDetail = get("api/threads/" + encode(id), mapOf("cursor" to cursor))
+    suspend fun queue(id: String): List<QueuedMessage> = get<QueueResponse>("api/threads/" + encode(id) + "/queue").messages
+    suspend fun cancelQueued(threadId: String, id: String): JsonObject = execute("DELETE", "api/threads/" + encode(threadId) + "/queue/" + encode(id))
     suspend fun submit(pending: PendingSubmission): JsonObject {
         val path = when {
             pending.threadId == null -> "api/threads"
+            pending.kind == "queue" -> "api/threads/" + encode(pending.threadId) + "/queue"
+            pending.kind.startsWith("guide:") -> "api/threads/" + encode(pending.threadId) + "/queue/" + encode(pending.kind.substringAfter(':')) + "/guide"
             pending.kind == "steer" -> "api/threads/" + encode(pending.threadId) + "/steer"
             else -> "api/threads/" + encode(pending.threadId) + "/turns"
         }
